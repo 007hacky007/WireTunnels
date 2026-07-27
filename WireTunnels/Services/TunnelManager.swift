@@ -2,6 +2,7 @@ import Foundation
 import Combine
 import AppKit
 import ServiceManagement
+import Darwin
 
 @MainActor
 final class TunnelManager: ObservableObject {
@@ -17,6 +18,7 @@ final class TunnelManager: ObservableObject {
     @Published var isDashboardOpen: Bool = false
     @Published var isInitialized: Bool = false
     @Published var trafficHistory: [UUID: [TrafficSample]] = [:]
+    @Published var hopChains: [HopChain] = []
     let currentUserIsAdministrator = TunnelManager.currentUserIsAdministrator()
 
     private var trafficSnapshots: [UUID: (rx: Int64, tx: Int64, time: Date)] = [:]
@@ -25,6 +27,7 @@ final class TunnelManager: ObservableObject {
     let commandService = WireGuardCommandService()
     let networkMonitor = NetworkMonitorService()
     private let repository = TunnelRepository()
+    private let hopChainRepository = HopChainRepository()
     private let configStorage = ConfigStorageService()
     private let parser = WireGuardConfigParser()
     private let toolLocator = WireGuardToolLocator()
@@ -36,6 +39,7 @@ final class TunnelManager: ObservableObject {
     private var networkCancellable: AnyCancellable?
     private var networkChangeDebounceTask: Task<Void, Never>?
     private var connectingTunnels: Set<UUID> = []
+    private var connectingChains: Set<UUID> = []
     private var statusFailureReported = false
     /// Raw managed-tunnel snapshot from the last successful `loadManagedTunnels()`
     /// call, before live runtime state (isActive/rxBytes/etc.) is merged in — used
@@ -91,6 +95,8 @@ final class TunnelManager: ObservableObject {
         // Load persisted personal tunnels first
         tunnels = repository.load().filter { $0.scope == .personal }
         log.info("Loaded \(tunnels.count) tunnels from storage")
+
+        hopChains = hopChainRepository.load()
 
         // Backfill publicKey / address for tunnels saved before these fields were populated
         var needsSave = false
@@ -451,9 +457,22 @@ final class TunnelManager: ObservableObject {
 
     // MARK: - Tunnel Operations
 
-    func connectTunnel(_ tunnel: Tunnel, isAutoConnect: Bool = false) async {
+    /// - Parameter suppressSystemDNS: When true, the tunnel's own `DNS =` entry is
+    ///   dropped from the staged runtime config, so wg-quick never touches system
+    ///   DNS for this connection. Used for a hop chain's hop leg: the hop never
+    ///   resolves hostnames itself (the exit's endpoint is already resolved to a
+    ///   literal IP before the chain connects, see `exitRouteEntry`), and if it also
+    ///   applied its own DNS, the exit leg's `networksetup -getdnsservers` snapshot —
+    ///   taken as its "pre-tunnel" baseline — would capture the hop's VPN DNS instead
+    ///   of the real one, leaving a VPN-looking DNS entry behind after the exit
+    ///   disconnects (the hop is still up at that point).
+    func connectTunnel(_ tunnel: Tunnel, isAutoConnect: Bool = false, suppressSystemDNS: Bool = false) async {
         guard let index = tunnels.firstIndex(where: { $0.id == tunnel.id }) else { return }
         let liveTunnel = tunnels[index]
+        if let chain = activeOrBusyChain(containing: liveTunnel.id), !connectingChains.contains(chain.id) {
+            errorMessage = "\(liveTunnel.name) is part of a multi-hop chain; connect or disconnect the chain instead."
+            return
+        }
         guard environment.isReady else {
             errorMessage = "Install and verify the bundled WireGuard tools in Settings before connecting."
             return
@@ -490,7 +509,15 @@ final class TunnelManager: ObservableObject {
             if liveTunnel.scope == .managed {
                 stagedRuntimePath = try await commandService.stageManagedConfig(id: liveTunnel.id)
             } else {
-                try await commandService.copyConfig(from: liveTunnel.configPath, to: runtimePath)
+                var sourcePath = liveTunnel.configPath
+                var dnsStrippedTempURL: URL?
+                if suppressSystemDNS {
+                    let tempURL = try Self.writeConfigWithoutDNS(from: liveTunnel.configPath)
+                    dnsStrippedTempURL = tempURL
+                    sourcePath = tempURL.path
+                }
+                defer { if let dnsStrippedTempURL { try? FileManager.default.removeItem(at: dnsStrippedTempURL) } }
+                try await commandService.copyConfig(from: sourcePath, to: runtimePath)
                 stagedRuntimePath = runtimePath
             }
             try await commandService.startTunnel(configPath: stagedRuntimePath)
@@ -514,6 +541,9 @@ final class TunnelManager: ObservableObject {
             if tunnels[index].isKillSwitchEnabled {
                 await armKillSwitch(for: tunnels[index])
             }
+            if !tunnels[index].excludedRoutes.isEmpty {
+                await syncExcludedRoutes(for: tunnels[index])
+            }
             log.info("Tunnel \(liveTunnel.name) connected")
             try? await notificationService.postConnected(tunnelName: liveTunnel.name)
         } catch {
@@ -529,6 +559,10 @@ final class TunnelManager: ObservableObject {
     func disconnectTunnel(_ tunnel: Tunnel, isAutoDisconnect: Bool = false) async {
         guard let index = tunnels.firstIndex(where: { $0.id == tunnel.id }) else { return }
         let liveTunnel = tunnels[index]
+        if let chain = activeOrBusyChain(containing: liveTunnel.id), !connectingChains.contains(chain.id) {
+            errorMessage = "\(liveTunnel.name) is part of a multi-hop chain; connect or disconnect the chain instead."
+            return
+        }
         if !isAutoDisconnect { networkMonitor.userDidDisconnect(liveTunnel.id) }
         log.info("\(isAutoDisconnect ? "Auto-disconnecting" : "Stopping") tunnel: \(liveTunnel.name)")
 
@@ -542,6 +576,9 @@ final class TunnelManager: ObservableObject {
             try await commandService.stopTunnel(configPath: configPath)
             if killSwitchArmedTunnelIDs.contains(liveTunnel.id) {
                 await disarmKillSwitch(for: liveTunnel)
+            }
+            if !liveTunnel.excludedRoutes.isEmpty {
+                try? await commandService.syncRoutes(ownerId: liveTunnel.id, entries: [])
             }
             if liveTunnel.scope == .managed {
                 do {
@@ -739,6 +776,16 @@ final class TunnelManager: ObservableObject {
         savePersonalTunnelsOnly()
     }
 
+    /// Sets the user-chosen speed-test URL. Pass nil/empty to disable the throughput
+    /// probe — there is no built-in default host.
+    func updateSpeedTestURL(for tunnel: Tunnel, url: String?) {
+        guard let index = tunnels.firstIndex(where: { $0.id == tunnel.id }) else { return }
+        guard tunnels[index].scope == .personal else { return }
+        tunnels[index].speedTestURL = (url?.isEmpty ?? true) ? nil : url
+        tunnels[index].updatedAt = Date()
+        savePersonalTunnelsOnly()
+    }
+
     // MARK: - Status
 
     func refreshStatus(reportError: Bool = true) async {
@@ -767,17 +814,34 @@ final class TunnelManager: ObservableObject {
         // On macOS with wireguard-go, wg show reports the kernel utun name (e.g. utun4),
         // not the config name (e.g. FMDigitech). Match by name first, then fall back to
         // peer public key, and record the real utun name for future polls.
+        //
+        // utun numbers aren't stable across a stop/start cycle — the kernel can hand
+        // a previously-learned name to a *different* tunnel the next time interfaces
+        // come up (most likely when several tunnels restart concurrently, e.g. after
+        // sleep). So a name match is only trusted once we've confirmed the interface's
+        // peer key still belongs to this tunnel; otherwise fall back to searching by
+        // peer key, which is what actually identifies the tunnel.
         var updatedTunnels = tunnels
         for index in updatedTunnels.indices {
             let iface = updatedTunnels[index].interfaceName
                 ?? URL(fileURLWithPath: updatedTunnels[index].configPath)
                 .deletingPathExtension().lastPathComponent
+            let peerKey = updatedTunnels[index].publicKey
+            let byName = statusMonitor.statusMap[iface]
 
-            let status: TunnelStatus? = statusMonitor.statusMap[iface]
-                ?? statusMonitor.statusMap.values.first(where: { s in
-                    guard let peerKey = updatedTunnels[index].publicKey else { return false }
-                    return s.peers.contains { $0.publicKey == peerKey }
-                })
+            let status: TunnelStatus?
+            if let peerKey {
+                let byNameIsOurs = byName.map { $0.peers.contains { $0.publicKey == peerKey } } ?? false
+                status = byNameIsOurs
+                    ? byName
+                    : statusMonitor.statusMap.values.first(where: { s in
+                        s.peers.contains { $0.publicKey == peerKey }
+                    })
+            } else {
+                // No known peer key to verify against (e.g. not parsed yet) — fall
+                // back to trusting the name match, as before.
+                status = byName
+            }
 
             if let status = status {
                 updatedTunnels[index].isActive = true
@@ -860,7 +924,9 @@ final class TunnelManager: ObservableObject {
     // MARK: - Connection Test
 
     /// On-demand latency check against the tunnel's own configured peer endpoint
-    /// (data the user already owns — no third-party host involved).
+    /// (data the user already owns — no third-party host involved). If the user has
+    /// set `speedTestURL` (never a built-in default), also runs a throughput probe
+    /// against that user-chosen URL.
     func testConnection(for tunnel: Tunnel) async -> ConnectionTestResult {
         guard let endpoint = tunnel.endpoint, let parsed = Self.parseEndpoint(endpoint) else {
             return .unknownEndpoint
@@ -870,7 +936,14 @@ final class TunnelManager: ObservableObject {
         }.value
         guard !samples.isEmpty else { return .unreachable }
         let average = samples.reduce(0, +) / Double(samples.count)
-        return .success(averageMs: average)
+
+        var throughputMbps: Double?
+        if let urlString = tunnel.speedTestURL, !urlString.isEmpty, let url = URL(string: urlString) {
+            throughputMbps = await Task.detached {
+                await ThroughputProbeService.measureThroughput(url: url)
+            }.value
+        }
+        return .success(averageMs: average, throughputMbps: throughputMbps)
     }
 
     // MARK: - Auto-Connect
@@ -880,6 +953,10 @@ final class TunnelManager: ObservableObject {
 
         for tunnel in tunnels {
             guard tunnel.autoConnectRule.enabled else { continue }
+            // A chain member's own auto-connect rule always governs just that one
+            // tunnel — it never cascades into bringing up (or tearing down) the
+            // whole chain. Multi-hop chains are connected/disconnected as a unit
+            // only through the explicit controls in HopChainView.
             // Disconnect takes priority: a network that matches both halves
             // (e.g. "any Wi-Fi" for connect and a specific SSID for disconnect)
             // should not connect.
@@ -907,7 +984,8 @@ final class TunnelManager: ObservableObject {
         }
     }
 
-    /// Restarts every active tunnel's interface after the system wakes from sleep.
+    /// Restarts every active tunnel's interface after the system wakes from sleep,
+    /// then re-evaluates on-demand rules.
     /// A tunnel that reads "connected" in the UI can be dead in practice — the
     /// underlying UDP socket and any dynamic-DNS-resolved peer endpoint can go
     /// stale across sleep, silently dropping traffic until wg-quick is rerun.
@@ -919,24 +997,41 @@ final class TunnelManager: ObservableObject {
         guard !isLoading, !needsSetup else { return }
 
         let activeTunnels = tunnels.filter { $0.isActive }
-        guard !activeTunnels.isEmpty else { return }
-        log.info("System wake: reconnecting \(activeTunnels.count) active tunnel(s)")
+        if !activeTunnels.isEmpty {
+            log.info("System wake: reconnecting \(activeTunnels.count) active tunnel(s)")
 
-        await withTaskGroup(of: Void.self) { group in
-            for tunnel in activeTunnels {
-                group.addTask { [weak self] in
-                    await self?.reconnectAfterWake(tunnel)
+            await withTaskGroup(of: Void.self) { group in
+                for tunnel in activeTunnels {
+                    group.addTask { [weak self] in
+                        await self?.reconnectAfterWake(tunnel)
+                    }
                 }
             }
+
+            await refreshStatus()
+            // Re-arm (idempotent) any kill-switch tunnel that's active again — the
+            // interface name/endpoint may have changed across the reconnect.
+            for tunnel in tunnels where tunnel.isActive && tunnel.isKillSwitchEnabled {
+                await armKillSwitch(for: tunnel)
+            }
+            // Re-derive exclusion routes too — the default gateway/interface can
+            // change across sleep just like the kill switch's interface/endpoint.
+            for tunnel in tunnels where tunnel.isActive && !tunnel.excludedRoutes.isEmpty {
+                await syncExcludedRoutes(for: tunnel)
+            }
+            // Same reasoning for hop chains — each leg's interfaceName can change
+            // across the restart above, so the host route needs re-deriving too.
+            for chain in hopChains where chain.isEnabled {
+                await reconnectHopChainAfterWake(chain)
+            }
+            log.info("System wake: reconnect pass complete")
         }
 
-        await refreshStatus()
-        // Re-arm (idempotent) any kill-switch tunnel that's active again — the
-        // interface name/endpoint may have changed across the reconnect.
-        for tunnel in tunnels where tunnel.isActive && tunnel.isKillSwitchEnabled {
-            await armKillSwitch(for: tunnel)
-        }
-        log.info("System wake: reconnect pass complete")
+        // On-demand rules also need to run here: if the machine wakes on the same
+        // Wi-Fi network it slept on, NWPathMonitor may never fire a fresh path
+        // update (no interface change to report), so this is the only place that
+        // would otherwise catch a tunnel that should auto-connect/disconnect now.
+        await handleNetworkChange()
     }
 
     private func reconnectAfterWake(_ tunnel: Tunnel) async {
@@ -1105,6 +1200,232 @@ final class TunnelManager: ObservableObject {
         updateWarnings()
     }
 
+    // MARK: - Split tunnel exclusions
+
+    /// Sets the tunnel's excluded-CIDR list and, if it's currently connected,
+    /// immediately re-syncs the privileged routes to match.
+    func updateExcludedRoutes(for tunnel: Tunnel, routes: [String]) {
+        guard let index = tunnels.firstIndex(where: { $0.id == tunnel.id }) else { return }
+        guard tunnels[index].scope == .personal else { return }
+        tunnels[index].excludedRoutes = routes
+        tunnels[index].updatedAt = Date()
+        savePersonalTunnelsOnly()
+        guard tunnels[index].isActive else { return }
+        let liveTunnel = tunnels[index]
+        Task { await syncExcludedRoutes(for: liveTunnel) }
+    }
+
+    /// Installs/updates `tunnel`'s split-tunnel exclusion routes against the
+    /// current default gateway, or flushes them if `excludedRoutes` is empty.
+    /// A CIDR that isn't actually more specific than anything the tunnel already
+    /// routes silently does nothing — there's no real CIDR-overlap check here for
+    /// v1, matching `updateWarnings()`'s existing exact-string AllowedIPs comparison.
+    private func syncExcludedRoutes(for tunnel: Tunnel) async {
+        guard !tunnel.excludedRoutes.isEmpty else {
+            try? await commandService.syncRoutes(ownerId: tunnel.id, entries: [])
+            return
+        }
+        let discoveredRoute = await Task.detached {
+            DefaultRouteService.currentDefaultRoute()
+        }.value
+        guard let defaultRoute = discoveredRoute else {
+            log.warning("Unable to determine default gateway; skipping route exclusions for \(tunnel.name)")
+            return
+        }
+        let entries = tunnel.excludedRoutes.map { cidr in
+            RouteEntry(
+                cidr: cidr,
+                gateway: defaultRoute.gateway,
+                interfaceName: defaultRoute.gateway == nil ? defaultRoute.interfaceName : nil
+            )
+        }
+        do {
+            try await commandService.syncRoutes(ownerId: tunnel.id, entries: entries)
+        } catch {
+            log.warning("Failed to sync route exclusions for \(tunnel.name): \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Multi-hop chains
+
+    /// The enabled chain `tunnelID` belongs to, as hop or exit, if any — regardless
+    /// of whether the chain is currently connected. Used to route on-demand
+    /// evaluation (`handleNetworkChange`) and chain-pairing exclusivity
+    /// (`addHopChain`) through the chain, not the individual tunnel.
+    private func chain(containing tunnelID: UUID) -> HopChain? {
+        hopChains.first { $0.isEnabled && ($0.hopTunnelID == tunnelID || $0.exitTunnelID == tunnelID) }
+    }
+
+    /// The chain `tunnelID` belongs to, but only if that chain is actually fully
+    /// established (both legs connected, i.e. brought up as a unit by
+    /// `connectHopChain`) or mid-operation — i.e. only when a manual individual
+    /// connect/disconnect could actually conflict with it. A chain that exists but
+    /// isn't fully up — whether fully disconnected or with only one leg connected
+    /// individually, outside the chain flow — shouldn't block using its member
+    /// tunnels individually; only `connectTunnel`/`disconnectTunnel` use this.
+    ///
+    /// This must key off "both legs active", not "either leg active": with the
+    /// latter, connecting one member individually (allowed, since the chain wasn't
+    /// active yet) would immediately make every future individual disconnect of
+    /// that same tunnel look like it conflicts with the chain, trapping the user —
+    /// connect would work but disconnect never would, short of finding the chain's
+    /// own disconnect control.
+    private func activeOrBusyChain(containing tunnelID: UUID) -> HopChain? {
+        guard let candidate = chain(containing: tunnelID) else { return nil }
+        if connectingChains.contains(candidate.id) { return candidate }
+        let hopActive = tunnels.first(where: { $0.id == candidate.hopTunnelID })?.isActive ?? false
+        let exitActive = tunnels.first(where: { $0.id == candidate.exitTunnelID })?.isActive ?? false
+        return (hopActive && exitActive) ? candidate : nil
+    }
+
+    /// Copies `configPath` to a throwaway temp file with any `[Interface] DNS = ...`
+    /// line removed, and returns the temp file's URL. Used to stage a hop chain's hop
+    /// leg without letting wg-quick touch system DNS for it — see `connectTunnel`'s
+    /// `suppressSystemDNS` parameter for why.
+    private static func writeConfigWithoutDNS(from configPath: String) throws -> URL {
+        let original = try String(contentsOfFile: configPath, encoding: .utf8)
+        var inInterfaceSection = false
+        let filteredLines = original.components(separatedBy: .newlines).filter { line in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("[") {
+                inInterfaceSection = trimmed.caseInsensitiveCompare("[Interface]") == .orderedSame
+                return true
+            }
+            guard inInterfaceSection else { return true }
+            let key = trimmed.split(separator: "=", maxSplits: 1).first?
+                .trimmingCharacters(in: .whitespaces) ?? ""
+            return key.caseInsensitiveCompare("DNS") != .orderedSame
+        }
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString).conf")
+        try filteredLines.joined(separator: "\n").write(to: tempURL, atomically: true, encoding: .utf8)
+        return tempURL
+    }
+
+    func addHopChain(hopTunnelID: UUID, exitTunnelID: UUID) {
+        guard hopTunnelID != exitTunnelID else { return }
+        guard chain(containing: hopTunnelID) == nil, chain(containing: exitTunnelID) == nil else {
+            errorMessage = "One of these tunnels is already part of another multi-hop chain."
+            return
+        }
+        hopChains.append(HopChain(hopTunnelID: hopTunnelID, exitTunnelID: exitTunnelID))
+        hopChainRepository.save(hopChains)
+    }
+
+    func removeHopChain(_ chain: HopChain) {
+        hopChains.removeAll { $0.id == chain.id }
+        hopChainRepository.save(hopChains)
+    }
+
+    /// Builds the host-route entry that steers `exitTunnel`'s own WireGuard traffic
+    /// through `hopInterfaceName` instead of the physical interface, resolving a
+    /// hostname endpoint to a literal IP first since `route(8)` needs one.
+    private func exitRouteEntry(exitTunnel: Tunnel, hopInterfaceName: String) async -> RouteEntry? {
+        guard let endpoint = exitTunnel.endpoint, let parsed = Self.parseEndpoint(endpoint) else { return nil }
+        let resolved = await Task.detached {
+            Self.resolveIPLiteral(parsed.host)
+        }.value
+        guard let exitPeerIP = resolved else { return nil }
+        return RouteEntry(cidr: "\(exitPeerIP)/32", gateway: nil, interfaceName: hopInterfaceName)
+    }
+
+    /// Brings up a hop chain: connects the hop tunnel, routes the exit tunnel's own
+    /// WireGuard traffic through the hop's interface via a host route, then connects
+    /// the exit tunnel — so the exit server sees the hop's IP, not the real one.
+    /// Rolls back everything it started on any failure.
+    func connectHopChain(_ chain: HopChain) async {
+        guard !connectingChains.contains(chain.id) else { return }
+        guard let hop = tunnels.first(where: { $0.id == chain.hopTunnelID }),
+              let exit = tunnels.first(where: { $0.id == chain.exitTunnelID }) else {
+            errorMessage = "This multi-hop chain refers to a tunnel that no longer exists."
+            return
+        }
+        guard !hop.isActive, !exit.isActive else {
+            errorMessage = "Disconnect \(hop.name) and \(exit.name) individually before connecting them as a chain."
+            return
+        }
+
+        connectingChains.insert(chain.id)
+        defer { connectingChains.remove(chain.id) }
+        log.info("Connecting hop chain: \(hop.name) -> \(exit.name)")
+
+        await connectTunnel(hop, suppressSystemDNS: true)
+        guard let liveHop = tunnels.first(where: { $0.id == hop.id }),
+              liveHop.isActive, let hopInterface = liveHop.interfaceName else {
+            errorMessage = "Failed to connect hop tunnel \(hop.name); multi-hop chain aborted."
+            return
+        }
+
+        guard let routeEntry = await exitRouteEntry(exitTunnel: exit, hopInterfaceName: hopInterface) else {
+            errorMessage = "Could not resolve \(exit.name)'s endpoint address; multi-hop chain aborted."
+            await disconnectTunnel(liveHop)
+            return
+        }
+
+        do {
+            try await commandService.syncRoutes(ownerId: chain.id, entries: [routeEntry])
+        } catch {
+            errorMessage = "Failed to route \(exit.name) through \(hop.name): \(error.localizedDescription)"
+            await disconnectTunnel(liveHop)
+            return
+        }
+
+        await connectTunnel(exit)
+        guard let liveExit = tunnels.first(where: { $0.id == exit.id }), liveExit.isActive else {
+            errorMessage = "Failed to connect exit tunnel \(exit.name); rolling back multi-hop chain."
+            try? await commandService.syncRoutes(ownerId: chain.id, entries: [])
+            await disconnectTunnel(liveHop)
+            return
+        }
+        log.info("Hop chain connected: \(hop.name) -> \(exit.name)")
+    }
+
+    /// Tears down a hop chain in reverse order: exit tunnel down, host route
+    /// flushed, then hop tunnel down — so the exit's traffic never has to fall back
+    /// to a route that's already gone.
+    func disconnectHopChain(_ chain: HopChain) async {
+        guard !connectingChains.contains(chain.id) else { return }
+        connectingChains.insert(chain.id)
+        defer { connectingChains.remove(chain.id) }
+
+        if let exit = tunnels.first(where: { $0.id == chain.exitTunnelID }), exit.isActive {
+            await disconnectTunnel(exit)
+        }
+        try? await commandService.syncRoutes(ownerId: chain.id, entries: [])
+        if let hop = tunnels.first(where: { $0.id == chain.hopTunnelID }), hop.isActive {
+            await disconnectTunnel(hop)
+        }
+        log.info("Hop chain disconnected: \(chain.hopTunnelID) -> \(chain.exitTunnelID)")
+    }
+
+    /// Re-derives the chain's host route after a wake-triggered restart of both
+    /// legs — `interfaceName` can change across that restart just like it can for
+    /// a standalone tunnel, so the route installed before sleep may now be stale.
+    ///
+    /// Also handles a subtler case even when the interface *name* doesn't change:
+    /// `reconnectAfterWake` tears down and recreates the hop's utun interface
+    /// (same name, new kernel object), and the kernel silently drops any route
+    /// bound to the old one. A plain re-sync would see the same `RouteEntry`
+    /// already tracked by the helper and skip re-issuing `route add` — so this
+    /// flushes first to force a genuine re-add regardless of what's tracked.
+    private func reconnectHopChainAfterWake(_ chain: HopChain) async {
+        guard let hop = tunnels.first(where: { $0.id == chain.hopTunnelID }), hop.isActive,
+              let hopInterface = hop.interfaceName,
+              let exit = tunnels.first(where: { $0.id == chain.exitTunnelID }), exit.isActive else {
+            return
+        }
+        guard let routeEntry = await exitRouteEntry(exitTunnel: exit, hopInterfaceName: hopInterface) else {
+            log.warning("Hop chain wake resync: could not resolve \(exit.name)'s endpoint address")
+            return
+        }
+        do {
+            try await commandService.syncRoutes(ownerId: chain.id, entries: [])
+            try await commandService.syncRoutes(ownerId: chain.id, entries: [routeEntry])
+        } catch {
+            log.warning("Hop chain wake resync failed for \(hop.name) -> \(exit.name): \(error.localizedDescription)")
+        }
+    }
+
     /// Splits a `wg show`-style endpoint string ("host:port" or "[host]:port" for IPv6) into its parts.
     private static func parseEndpoint(_ endpoint: String) -> (host: String, port: Int)? {
         if endpoint.hasPrefix("["), let closeBracket = endpoint.firstIndex(of: "]") {
@@ -1117,6 +1438,34 @@ final class TunnelManager: ObservableObject {
         let host = String(endpoint[..<lastColon])
         guard let port = Int(endpoint[endpoint.index(after: lastColon)...]) else { return nil }
         return (host, port)
+    }
+
+    /// Resolves `host` to a literal IP address — passes it through unchanged if it
+    /// already is one. Used for multi-hop's host route, which needs a literal, not
+    /// a hostname. Blocking (DNS lookup) — call from a background task.
+    nonisolated private static func resolveIPLiteral(_ host: String) -> String? {
+        var addr4 = in_addr()
+        if host.withCString({ inet_pton(AF_INET, $0, &addr4) }) == 1 { return host }
+        var addr6 = in6_addr()
+        if host.withCString({ inet_pton(AF_INET6, $0, &addr6) }) == 1 { return host }
+
+        var hints = addrinfo()
+        hints.ai_family = AF_UNSPEC
+        hints.ai_socktype = SOCK_DGRAM
+        var result: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(host, nil, &hints, &result) == 0, let first = result else { return nil }
+        defer { freeaddrinfo(result) }
+
+        var buffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        guard getnameinfo(
+            first.pointee.ai_addr, first.pointee.ai_addrlen,
+            &buffer, socklen_t(buffer.count),
+            nil, 0,
+            NI_NUMERICHOST
+        ) == 0 else {
+            return nil
+        }
+        return String(cString: buffer)
     }
 
     // MARK: - Warnings
@@ -1263,6 +1612,16 @@ final class TunnelManager: ObservableObject {
     }
 
     func stopAllActive() async {
+        // Chains first — disconnectHopChain tears down exit-then-hop in the right
+        // order, so an individual disconnectTunnel below never fights over a hop
+        // interface a still-active exit's route depends on.
+        for chain in hopChains where chain.isEnabled {
+            let hopActive = tunnels.first(where: { $0.id == chain.hopTunnelID })?.isActive ?? false
+            let exitActive = tunnels.first(where: { $0.id == chain.exitTunnelID })?.isActive ?? false
+            if hopActive || exitActive {
+                await disconnectHopChain(chain)
+            }
+        }
         for tunnel in tunnels.filter({ $0.isActive }) {
             await disconnectTunnel(tunnel)
         }
@@ -1350,7 +1709,7 @@ final class TunnelManager: ObservableObject {
 }
 
 enum ConnectionTestResult {
-    case success(averageMs: Double)
+    case success(averageMs: Double, throughputMbps: Double?)
     case unreachable
     case unknownEndpoint
 }

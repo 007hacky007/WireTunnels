@@ -39,8 +39,10 @@ struct WireTunnelsApp: App {
 
     init() {
         AppMigration.migrateIfNeeded()
-        _tunnelManager = StateObject(wrappedValue: TunnelManager())
+        let manager = TunnelManager()
+        _tunnelManager = StateObject(wrappedValue: manager)
         _dashboardNavigation = StateObject(wrappedValue: DashboardNavigation())
+        AppIntentBridge.tunnelManager = manager
     }
 
     var body: some Scene {

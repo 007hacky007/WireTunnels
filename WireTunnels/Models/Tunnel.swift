@@ -51,9 +51,11 @@ struct Tunnel: Identifiable, Codable, Equatable, Hashable {
     var killSwitchEnabled: Bool
     var address: [String]?      // [Interface] Address — tunnel's own IPs
     var allowedIPs: [String]
+    var excludedRoutes: [String]  // CIDR ranges to bypass this tunnel at runtime, routed via the pre-VPN gateway
     var dns: [String]
     var endpoint: String?
     var publicKey: String?
+    var speedTestURL: String?   // user-supplied HTTPS URL for the optional throughput probe — never a built-in default
     var lastHandshake: Date?
     var rxBytes: Int64
     var txBytes: Int64
@@ -76,9 +78,11 @@ struct Tunnel: Identifiable, Codable, Equatable, Hashable {
         case killSwitchEnabled
         case address
         case allowedIPs
+        case excludedRoutes
         case dns
         case endpoint
         case publicKey
+        case speedTestURL
         case lastHandshake
         case rxBytes
         case txBytes
@@ -101,9 +105,11 @@ struct Tunnel: Identifiable, Codable, Equatable, Hashable {
         self.autoConnectRule = AutoConnectRule()
         self.killSwitchEnabled = false
         self.allowedIPs = []
+        self.excludedRoutes = []
         self.dns = []
         self.endpoint = nil
         self.publicKey = nil
+        self.speedTestURL = nil
         self.lastHandshake = nil
         self.rxBytes = 0
         self.txBytes = 0
@@ -130,9 +136,11 @@ struct Tunnel: Identifiable, Codable, Equatable, Hashable {
         killSwitchEnabled = try container.decodeIfPresent(Bool.self, forKey: .killSwitchEnabled) ?? false
         address = try container.decodeIfPresent([String].self, forKey: .address)
         allowedIPs = try container.decode([String].self, forKey: .allowedIPs)
+        excludedRoutes = try container.decodeIfPresent([String].self, forKey: .excludedRoutes) ?? []
         dns = try container.decode([String].self, forKey: .dns)
         endpoint = try container.decodeIfPresent(String.self, forKey: .endpoint)
         publicKey = try container.decodeIfPresent(String.self, forKey: .publicKey)
+        speedTestURL = try container.decodeIfPresent(String.self, forKey: .speedTestURL)
         lastHandshake = try container.decodeIfPresent(Date.self, forKey: .lastHandshake)
         rxBytes = try container.decode(Int64.self, forKey: .rxBytes)
         txBytes = try container.decode(Int64.self, forKey: .txBytes)

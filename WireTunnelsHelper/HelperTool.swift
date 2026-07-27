@@ -3,8 +3,8 @@ import Darwin
 import Foundation
 import Security
 
-private let helperVersionNumber = "1.0.3"
-private let helperProtocolRevisionValue = "kill-switch-v1"
+private let helperVersionNumber = "1.0.4"
+private let helperProtocolRevisionValue = "route-sync-v1"
 private let applicationIdentifier = "com.fmdigitech.WireTunnels"
 private let applicationTeamIdentifier = "48W4Z4X56T"
 private let systemRoot = URL(fileURLWithPath: "/Library/Application Support/WireTunnels")
@@ -164,6 +164,42 @@ private struct KillSwitchEntry: Codable {
     let interfaceName: String
     let endpointHost: String
     let endpointPort: Int
+}
+
+private struct RouteEntry: Codable, Equatable {
+    let cidr: String
+    let gateway: String?
+    let interfaceName: String?
+}
+
+/// Tracks the routes currently installed per owner (a tunnel or hop-chain UUID
+/// string) so `syncRoutes` can diff and issue precise add/delete calls. Deliberately
+/// module-level rather than a `HelperSession` property — `HelperSession` is
+/// recreated per XPC connection, but the app only ever holds one connection at a
+/// time and may transparently reconnect after an error; this state must survive
+/// that. On a helper crash/relaunch this in-memory state is lost, which can leave
+/// stale routes in the kernel table until the owning tunnel's next disconnect
+/// resyncs with an empty entry list — an accepted v1 limitation.
+private final class RouteTrackingStore {
+    static let shared = RouteTrackingStore()
+    private let lock = NSLock()
+    private var entriesByOwner: [String: [RouteEntry]] = [:]
+
+    func previous(for ownerId: String) -> [RouteEntry] {
+        lock.lock()
+        defer { lock.unlock() }
+        return entriesByOwner[ownerId] ?? []
+    }
+
+    func set(_ entries: [RouteEntry], for ownerId: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        if entries.isEmpty {
+            entriesByOwner.removeValue(forKey: ownerId)
+        } else {
+            entriesByOwner[ownerId] = entries
+        }
+    }
 }
 
 private struct ManagedTunnelRecord: Codable, Equatable, Identifiable {
@@ -504,6 +540,122 @@ private final class HelperSession: NSObject, WireguardHelperProtocol {
         var addr6 = in6_addr()
         if value.withCString({ inet_pton(AF_INET6, $0, &addr6) }) == 1 { return true }
         return false
+    }
+
+    private static func isValidCIDR(_ value: String) -> Bool {
+        let parts = value.split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.count == 2, let prefix = Int(parts[1]) else { return false }
+        let address = String(parts[0])
+        var addr4 = in_addr()
+        if address.withCString({ inet_pton(AF_INET, $0, &addr4) }) == 1 {
+            return (0...32).contains(prefix)
+        }
+        var addr6 = in6_addr()
+        if address.withCString({ inet_pton(AF_INET6, $0, &addr6) }) == 1 {
+            return (0...128).contains(prefix)
+        }
+        return false
+    }
+
+    /// Broader than `isValidInterfaceName` — route entries can point at a physical
+    /// gateway interface (en0, awdl0, ...) as well as a WireGuard utun, unlike the
+    /// kill switch anchor which only ever arms utun interfaces.
+    private static let routingInterfaceRegex = try? NSRegularExpression(pattern: "^[a-z]{2,8}[0-9]{1,3}$")
+
+    private static func isValidRoutingInterfaceName(_ value: String) -> Bool {
+        guard let routingInterfaceRegex else { return false }
+        let range = NSRange(value.startIndex..<value.endIndex, in: value)
+        return routingInterfaceRegex.firstMatch(in: value, range: range) != nil
+    }
+
+    /// Whether `cidr` denotes a single host (/32 for IPv4, /128 for IPv6) rather
+    /// than a network range — determines `-host` vs `-net` for route(8).
+    private static func isHostCIDR(_ value: String) -> Bool {
+        let parts = value.split(separator: "/")
+        guard parts.count == 2, let prefix = Int(parts[1]) else { return false }
+        return parts[0].contains(":") ? prefix == 128 : prefix == 32
+    }
+
+    private static func routeArguments(for entry: RouteEntry) -> [String] {
+        let parts = entry.cidr.split(separator: "/")
+        let address = parts.first.map(String.init) ?? entry.cidr
+        var args: [String]
+        if isHostCIDR(entry.cidr) {
+            args = ["-host", address]
+        } else {
+            args = ["-net", entry.cidr]
+        }
+        if let gateway = entry.gateway {
+            args.append(gateway)
+        } else if let interfaceName = entry.interfaceName {
+            args.append(contentsOf: ["-interface", interfaceName])
+        }
+        return args
+    }
+
+    /// Loads (or, for an empty list, flushes) more-specific routes for `ownerId` —
+    /// a tunnel UUID for split-tunnel exclusions, or a hop-chain UUID for the
+    /// chain's host route. Diffs against what was previously installed for the same
+    /// owner and issues precise `route add`/`route delete` calls, mirroring
+    /// `syncKillSwitch`'s validate-then-resync shape but scoped per-owner rather
+    /// than one shared anchor, since routes for different owners must not clobber
+    /// each other.
+    func syncRoutes(ownerId: String, entries: Data, reply: @escaping (Bool, String?) -> Void) {
+        let decoded: [RouteEntry]
+        do {
+            decoded = try JSONDecoder().decode([RouteEntry].self, from: entries)
+        } catch {
+            reply(false, "Invalid route sync request")
+            return
+        }
+
+        for entry in decoded {
+            guard Self.isValidCIDR(entry.cidr) else {
+                reply(false, "Invalid route CIDR: \(entry.cidr)")
+                return
+            }
+            switch (entry.gateway, entry.interfaceName) {
+            case (let gateway?, nil):
+                guard Self.isValidIPLiteral(gateway) else {
+                    reply(false, "Invalid route gateway")
+                    return
+                }
+            case (nil, let interfaceName?):
+                guard Self.isValidRoutingInterfaceName(interfaceName) else {
+                    reply(false, "Invalid route interface: \(interfaceName)")
+                    return
+                }
+            default:
+                reply(false, "Route entry must specify exactly one of gateway or interface")
+                return
+            }
+        }
+
+        let route = URL(fileURLWithPath: "/sbin/route")
+        let previous = RouteTrackingStore.shared.previous(for: ownerId)
+        let removed = previous.filter { !decoded.contains($0) }
+        let added = decoded.filter { !previous.contains($0) }
+
+        for entry in removed {
+            let result = runCommand(executable: route, arguments: ["delete"] + Self.routeArguments(for: entry))
+            let benign = (result.stdout + result.stderr).contains("not in table")
+            guard result.exitCode == 0 || benign else {
+                reply(false, commandError(result, fallback: "Unable to remove route \(entry.cidr)"))
+                return
+            }
+        }
+
+        for entry in added {
+            let result = runCommand(executable: route, arguments: ["add"] + Self.routeArguments(for: entry))
+            let benign = (result.stdout + result.stderr).contains("File exists")
+            guard result.exitCode == 0 || benign else {
+                reply(false, commandError(result, fallback: "Unable to add route \(entry.cidr)"))
+                return
+            }
+        }
+
+        RouteTrackingStore.shared.set(decoded, for: ownerId)
+        reply(true, nil)
     }
 
     func generateKeyPair(reply: @escaping (String?, String?, String?) -> Void) {

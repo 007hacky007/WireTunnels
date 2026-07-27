@@ -278,6 +278,39 @@ struct SettingsView: View {
                         .tint(.red)
                     }
                 }
+
+                // MARK: About
+                SettingsSection(title: "About", systemImage: "info.circle") {
+                    HStack(spacing: 16) {
+                        Image("FMLogo")
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 72, height: 48)
+                            .accessibilityLabel("FMDigitech logo")
+
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text("WireTunnels")
+                                .font(.body.weight(.semibold))
+
+                            Text(appVersionDescription)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+
+                            if let websiteURL = Self.websiteURL {
+                                Link(destination: websiteURL) {
+                                    HStack(spacing: 4) {
+                                        Text("Created by FMDigitech")
+                                        Image(systemName: "arrow.up.right")
+                                            .font(.caption2)
+                                    }
+                                }
+                                .font(.subheadline.weight(.medium))
+                            }
+                        }
+
+                        Spacer()
+                    }
+                }
             }
             .padding(20)
         }
@@ -360,6 +393,15 @@ struct SettingsView: View {
                 tunnelManager.errorMessage = nil
             }
         )
+    }
+
+    private static let websiteURL = URL(string: "https://fmdigitech.com")
+
+    private var appVersionDescription: String {
+        let version = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleShortVersionString"
+        ) as? String ?? "—"
+        return "Version \(version)"
     }
 }
 

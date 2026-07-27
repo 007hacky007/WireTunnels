@@ -28,7 +28,7 @@ struct TunnelListView: View {
             }
             let warnedSet = Set(warnedNames)
             return tunnelManager.tunnels.filter { warnedSet.contains($0.name) }
-        case .settings, .log:
+        case .multiHop, .settings, .log:
             return []
         }
     }
@@ -40,7 +40,7 @@ struct TunnelListView: View {
         case .shared:    return "No Shared Tunnels"
         case .favorites: return "No Favorites"
         case .warnings:  return "No Warnings"
-        case .settings, .log: return ""
+        case .multiHop, .settings, .log: return ""
         }
     }
 
@@ -56,7 +56,7 @@ struct TunnelListView: View {
             return "Star a tunnel to mark it as a favorite."
         case .warnings:
             return "Your configuration looks good — no issues detected."
-        case .settings, .log:
+        case .multiHop, .settings, .log:
             return ""
         }
     }
@@ -68,7 +68,7 @@ struct TunnelListView: View {
         case .shared:    return "person.2"
         case .favorites: return "star"
         case .warnings:  return "checkmark.shield"
-        case .settings, .log: return "gear"
+        case .multiHop, .settings, .log: return "gear"
         }
     }
 
@@ -124,7 +124,7 @@ struct TunnelListView: View {
             return "\(count) favorite\(count == 1 ? "" : "s")"
         case .warnings:
             return "\(count) tunnel\(count == 1 ? "" : "s") affected"
-        case .settings, .log:
+        case .multiHop, .settings, .log:
             return ""
         }
     }

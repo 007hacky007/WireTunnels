@@ -101,6 +101,38 @@
             />
         </item>
 
+        <item>
+            <title>Version 1.0.4</title>
+            <pubDate>Mon, 27 Jul 2026 00:00:00 +0000</pubDate>
+            <sparkle:version>5</sparkle:version>
+            <sparkle:shortVersionString>1.0.4</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[
+                <ul>
+                    <li>Fixed tunnels not reliably reconnecting or auto-connecting/disconnecting after your Mac wakes from sleep</li>
+                    <li>Fixed Allowed IPs occasionally getting mixed up between tunnels after reconnecting</li>
+                    <li>Tunnel speed test: optionally set your own URL per tunnel to measure throughput alongside the existing latency check</li>
+                    <li>Shortcuts support: connect, disconnect, disconnect all, or check which tunnels are connected — from Shortcuts, Siri, or Raycast</li>
+                    <li>Split tunnel exclusions: exclude specific IP ranges from a tunnel at runtime, without editing the config or reconnecting</li>
+                    <li>Multi-hop: chain two tunnels together so traffic exits through a second server, hiding your real IP from the exit server</li>
+                </ul>
+                <p><strong>Notes</strong></p>
+                <ul>
+                    <li>The speed test only runs against a URL you set yourself — there is no built-in default host</li>
+                    <li>Split tunnel exclusions and multi-hop use the same privileged helper mechanism as the existing kill switch — no new permissions beyond what's already required</li>
+                    <li>Existing installs will be prompted to update the privileged helper on first launch after upgrading (required for the new routing capability)</li>
+                    <li>Multi-hop chains connect and disconnect as a unit only from the Multi-Hop screen — each tunnel's own On-Demand rule still connects/disconnects just that tunnel, not the chain</li>
+                    <li>Only the exit tunnel in a multi-hop chain manages your DNS server, so it's correctly restored to your real network's DNS once you disconnect</li>
+                </ul>
+            ]]></description>
+            <enclosure
+                url="https://github.com/FMDigitech/WireTunnels/releases/download/v1.0.4/WireTunnels-1.0.4.dmg"
+                sparkle:edSignature="GNAvEbpJ44RggX9y91tqIHJThZPg+w11XbSwNeW+WBFlLUzxCGo3KaBtzdONJQiNeC/YkpmBqubaDlJVz6a2Bg=="
+                length="14106121"
+                type="application/octet-stream"
+            />
+        </item>
+
         <!--
         Next release: bump CFBundleVersion (integer) and MARKETING_VERSION in Xcode,
         run sign_update on the new dmg (or zip), add a new <item> above this comment.

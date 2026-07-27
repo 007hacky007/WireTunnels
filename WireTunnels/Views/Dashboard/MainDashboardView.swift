@@ -6,6 +6,7 @@ enum SidebarItem: String, CaseIterable, Hashable {
     case active = "Active"
     case shared = "Shared"
     case favorites = "Favorites"
+    case multiHop = "Multi-Hop"
     case warnings = "Warnings"
     case settings = "Settings"
     case log = "Log"
@@ -16,6 +17,7 @@ enum SidebarItem: String, CaseIterable, Hashable {
         case .active:    return "bolt.fill"
         case .shared:    return "person.2.fill"
         case .favorites: return "star.fill"
+        case .multiHop:  return "arrow.triangle.branch"
         case .warnings:  return "exclamationmark.triangle.fill"
         case .settings:  return "gear"
         case .log:       return "doc.text"
@@ -26,7 +28,7 @@ enum SidebarItem: String, CaseIterable, Hashable {
         switch self {
         case .all, .active, .shared, .favorites:
             return true
-        case .warnings, .settings, .log:
+        case .multiHop, .warnings, .settings, .log:
             return false
         }
     }
@@ -173,6 +175,9 @@ struct MainDashboardView: View {
                 .environmentObject(updaterService)
         case .log:
             LogView()
+        case .multiHop:
+            HopChainView()
+                .environmentObject(tunnelManager)
         case .warnings:
             WarningsListView()
                 .environmentObject(tunnelManager)
@@ -285,6 +290,7 @@ private struct SidebarView: View {
         case .active:    return .green
         case .shared:    return .purple
         case .favorites: return .yellow
+        case .multiHop:  return .indigo
         case .warnings:  return .orange
         case .settings:  return .gray
         case .log:       return .blue

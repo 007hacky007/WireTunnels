@@ -5,7 +5,10 @@ import Foundation
 /// networksetup(8). Plain ICMP echo needs no privilege escalation on macOS, so
 /// this never touches the privileged helper.
 enum PingService {
-    private static let timeRegex = try? NSRegularExpression(pattern: #"time=([0-9.]+)\s*ms"#)
+    // Immutable after construction and read only from the nonisolated function
+    // below — safe to access from any isolation context despite the project's
+    // MainActor-by-default setting.
+    private nonisolated static let timeRegex = try? NSRegularExpression(pattern: #"time=([0-9.]+)\s*ms"#)
 
     /// Round-trip times in milliseconds for each reply received; empty if the
     /// host was unreachable or every request timed out. Blocking — call from a

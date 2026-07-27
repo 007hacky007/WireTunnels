@@ -64,6 +64,7 @@ struct TunnelDetailView: View {
     @State private var showingQRCode = false
     @State private var isTestingConnection = false
     @State private var connectionTestResult: String? = nil
+    @State private var speedTestURLText: String = ""
     @State private var isSharingTunnel = false
     @State private var isProcessing = false
     @State private var isLoadingConnectedUsers = false
@@ -89,6 +90,10 @@ struct TunnelDetailView: View {
 
     // Kill switch — mirrors live.isKillSwitchEnabled, saved immediately on change.
     @State private var killSwitchEnabled: Bool = false
+
+    // Split tunnel exclusions — mirrors live.excludedRoutes, saved immediately on change.
+    @State private var excludedRoutes: [String] = []
+    @State private var newExcludedRoute: String = ""
 
     // Always read live data from TunnelManager so stats update in real-time
     private var live: Tunnel {
@@ -195,6 +200,21 @@ struct TunnelDetailView: View {
                                 .foregroundStyle(.secondary)
                         }
                     }
+
+                    if !isManaged {
+                        VStack(alignment: .leading, spacing: 4) {
+                            TextField("Speed test URL (optional)", text: $speedTestURLText)
+                                .textFieldStyle(.roundedBorder)
+                                .disableAutocorrection(true)
+                                .onSubmit(saveSpeedTestURL)
+                                .onChange(of: speedTestURLText) { _, newValue in
+                                    if newValue.isEmpty { saveSpeedTestURL() }
+                                }
+                            Text("Set your own HTTPS URL to measure throughput alongside latency when testing this tunnel. Left empty, no throughput probe runs.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 }
 
                 if isManaged && tunnelManager.currentUserIsAdministrator {
@@ -218,6 +238,13 @@ struct TunnelDetailView: View {
 
                 // Kill Switch
                 killSwitchSection
+
+                if !isManaged {
+                    Divider()
+
+                    // Split Tunnel Exclusions
+                    splitTunnelSection
+                }
 
                 Divider()
 
@@ -248,9 +275,13 @@ struct TunnelDetailView: View {
         .onAppear {
             loadRule()
             killSwitchEnabled = live.isKillSwitchEnabled
+            speedTestURLText = live.speedTestURL ?? ""
+            excludedRoutes = live.excludedRoutes
         }
         .onChange(of: live.autoConnectRule) { _, _ in loadRule() }
         .onChange(of: live.isKillSwitchEnabled) { _, newValue in killSwitchEnabled = newValue }
+        .onChange(of: live.speedTestURL) { _, newValue in speedTestURLText = newValue ?? "" }
+        .onChange(of: live.excludedRoutes) { _, newValue in excludedRoutes = newValue }
         .task {
             knownNetworks = await Task.detached { NetworkMonitorService.knownWiFiNetworkNames() }.value
         }
@@ -545,13 +576,23 @@ struct TunnelDetailView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Toggle(isOn: $killSwitchEnabled) {
+            Toggle(isOn: Binding(
+                get: { killSwitchEnabled },
+                set: { newValue in
+                    // Only a real user toggle should trigger a save — unlike a plain
+                    // .onChange(of: killSwitchEnabled), this setter isn't invoked when
+                    // onAppear/onChange(of: live.isKillSwitchEnabled) merely syncs the
+                    // local state from what's already persisted, so re-mounting this
+                    // view no longer re-saves and re-arms the kill switch for no reason.
+                    killSwitchEnabled = newValue
+                    saveKillSwitch()
+                }
+            )) {
                 Label("Block traffic if this tunnel drops", systemImage: "shield.lefthalf.filled")
                     .font(.subheadline.weight(.medium))
             }
             .toggleStyle(.switch)
             .disabled(!canEditOnDemand)
-            .onChange(of: killSwitchEnabled) { _, _ in saveKillSwitch() }
 
             Text("Blocks all other network traffic until this tunnel reconnects. Disconnecting it yourself does not trigger a block.")
                 .font(.caption)
@@ -573,6 +614,66 @@ struct TunnelDetailView: View {
         } else {
             tunnelManager.updateKillSwitch(for: live, enabled: killSwitchEnabled)
         }
+    }
+
+    // MARK: Split Tunnel Exclusions
+
+    private var splitTunnelSection: some View {
+        DetailSection(title: "Split Tunnel Exclusions") {
+            Text("Traffic to these ranges bypasses this tunnel and goes out your regular connection instead, even while connected.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if !excludedRoutes.isEmpty {
+                VStack(spacing: 4) {
+                    ForEach(excludedRoutes, id: \.self) { cidr in
+                        HStack {
+                            Image(systemName: "arrow.triangle.branch")
+                                .foregroundStyle(.secondary)
+                                .font(.caption)
+                            Text(cidr)
+                                .font(.system(.subheadline, design: .monospaced))
+                            Spacer()
+                            Button {
+                                excludedRoutes.removeAll { $0 == cidr }
+                                saveExcludedRoutes()
+                            } label: {
+                                Image(systemName: "minus.circle.fill")
+                                    .foregroundStyle(.red)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+                    }
+                }
+            }
+
+            HStack {
+                TextField("CIDR to exclude, e.g. 10.0.5.0/24", text: $newExcludedRoute)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.body, design: .monospaced))
+                    .disableAutocorrection(true)
+                    .onSubmit(addExcludedRoute)
+                Button("Add", action: addExcludedRoute)
+                    .buttonStyle(.bordered)
+                    .disabled(newExcludedRoute.trimmingCharacters(in: .whitespaces).isEmpty ||
+                              excludedRoutes.contains(newExcludedRoute.trimmingCharacters(in: .whitespaces)))
+            }
+        }
+    }
+
+    private func addExcludedRoute() {
+        let cidr = newExcludedRoute.trimmingCharacters(in: .whitespaces)
+        guard !cidr.isEmpty, !excludedRoutes.contains(cidr) else { return }
+        excludedRoutes.append(cidr)
+        newExcludedRoute = ""
+        saveExcludedRoutes()
+    }
+
+    private func saveExcludedRoutes() {
+        tunnelManager.updateExcludedRoutes(for: live, routes: excludedRoutes)
     }
 
     private var actionsSection: some View {
@@ -641,8 +742,12 @@ struct TunnelDetailView: View {
         connectionTestResult = nil
         Task {
             switch await tunnelManager.testConnection(for: live) {
-            case .success(let averageMs):
-                connectionTestResult = String(format: "%.0f ms avg", averageMs)
+            case .success(let averageMs, let throughputMbps):
+                if let throughputMbps {
+                    connectionTestResult = String(format: "%.0f ms avg, %.1f Mbps", averageMs, throughputMbps)
+                } else {
+                    connectionTestResult = String(format: "%.0f ms avg", averageMs)
+                }
             case .unreachable:
                 connectionTestResult = "Unreachable"
             case .unknownEndpoint:
@@ -650,6 +755,11 @@ struct TunnelDetailView: View {
             }
             isTestingConnection = false
         }
+    }
+
+    private func saveSpeedTestURL() {
+        guard !isManaged else { return }
+        tunnelManager.updateSpeedTestURL(for: live, url: speedTestURLText)
     }
 
     private func makeShared() {

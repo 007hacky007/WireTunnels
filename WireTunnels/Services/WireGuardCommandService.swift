@@ -8,11 +8,21 @@ struct KillSwitchEntry: Codable {
     let endpointPort: Int
 }
 
+/// A privileged route to install/remove. `cidr` is the network or host (e.g.
+/// "10.0.5.0/24" or "203.0.113.9/32") to steer; exactly one of `gateway`/
+/// `interfaceName` must be set. Shared by split-tunnel exclusions (route to the
+/// physical gateway) and multi-hop chaining (host route to a hop's utun interface).
+struct RouteEntry: Codable, Equatable {
+    let cidr: String
+    let gateway: String?
+    let interfaceName: String?
+}
+
 @MainActor
 final class WireGuardCommandService {
     nonisolated static let helperMachServiceName = "com.fmdigitech.WireTunnels.helper"
-    nonisolated static let expectedHelperVersion = "1.0.3"
-    nonisolated static let expectedHelperProtocolRevision = "kill-switch-v1"
+    nonisolated static let expectedHelperVersion = "1.0.4"
+    nonisolated static let expectedHelperProtocolRevision = "route-sync-v1"
     private static let helperCheckTimeoutNanoseconds: UInt64 = 3_000_000_000
     private static let keyGenerationTimeoutNanoseconds: UInt64 = 10_000_000_000
     private static let operationTimeoutNanoseconds: UInt64 = 30_000_000_000
@@ -375,6 +385,20 @@ final class WireGuardCommandService {
         }
     }
 
+    /// `ownerId` identifies whose routes these are — a tunnel's own UUID for split-
+    /// tunnel exclusions, or a `HopChain`'s UUID for the chain's host route. Pass an
+    /// empty `entries` array to flush everything previously installed for that owner.
+    func syncRoutes(ownerId: UUID, entries: [RouteEntry]) async throws {
+        let data = try JSONEncoder().encode(entries)
+        return try await performHelperOperation(timeoutDescription: "Updating routes") { helper, complete in
+            helper.syncRoutes(ownerId: ownerId.uuidString, entries: data) { success, errorMessage in
+                complete(success
+                    ? .success(())
+                    : .failure(CommandError.routeSyncFailed(errorMessage ?? "Unknown")))
+            }
+        }
+    }
+
     func getWgShowOutput() async throws -> String {
         try await performHelperOperation(timeoutDescription: "Refreshing tunnel status") { helper, complete in
             helper.runWgShow { output, errorMessage in
@@ -631,6 +655,7 @@ enum CommandError: LocalizedError {
     case authorizationFailed(OSStatus)
     case managedTunnelFailed(String)
     case killSwitchFailed(String)
+    case routeSyncFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -654,6 +679,7 @@ enum CommandError: LocalizedError {
         case .authorizationFailed(let status): return "Administrator authorization failed (\(status))"
         case .managedTunnelFailed(let msg): return "Managed tunnel operation failed: \(msg)"
         case .killSwitchFailed(let msg): return "Kill switch update failed: \(msg)"
+        case .routeSyncFailed(let msg): return "Route update failed: \(msg)"
         }
     }
 }
