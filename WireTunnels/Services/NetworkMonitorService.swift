@@ -5,6 +5,9 @@ import CoreWLAN
 import CoreLocation
 import Combine
 import OSLog
+#if canImport(Darwin)
+import Darwin
+#endif
 
 /// Monitors active network interfaces and drives auto-connect/disconnect logic.
 @MainActor
@@ -26,6 +29,16 @@ final class NetworkMonitorService: NSObject, ObservableObject {
     var onNetworkChange: (() async -> Void)?
     /// Called when the system wakes from sleep (already dispatched to MainActor).
     var onSystemWake: (() async -> Void)?
+    /// Called when the primary physical interface keeps its name (no Wi-Fi/Ethernet
+    /// switch) but its own IPv4 address changes — e.g. a DHCP lease renewal. Distinct
+    /// from `onNetworkChange`, which only drives On-Demand rule evaluation and does
+    /// nothing for an already-active tunnel that isn't governed by a rule.
+    var onLocalAddressChange: (() async -> Void)?
+
+    // Last-seen (interface name, IPv4 address) of the primary physical interface,
+    // used to tell a DHCP renewal (same interface, new address) apart from a real
+    // interface switch (handled separately via onNetworkChange/On-Demand rules).
+    private var lastPrimaryInterfaceFingerprint: (name: String, address: String)?
 
     // Tunnels connected by the auto-connect rule (not by the user)
     private var autoConnectedIDs: Set<UUID>  = []
@@ -41,6 +54,10 @@ final class NetworkMonitorService: NSObject, ObservableObject {
         monitor.pathUpdateHandler = { [weak self] path in
             let onWifi     = path.usesInterfaceType(.wifi)
             let onEthernet = path.usesInterfaceType(.wiredEthernet)
+            let primaryInterfaceName = path.availableInterfaces.first {
+                (onWifi && $0.type == .wifi) || (onEthernet && $0.type == .wiredEthernet)
+            }?.name
+            let primaryAddress = primaryInterfaceName.flatMap { Self.ipv4Address(forInterface: $0) }
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 let ssid: String? = onWifi ? Self.fetchCurrentSSID() : nil
@@ -48,6 +65,18 @@ final class NetworkMonitorService: NSObject, ObservableObject {
                 self.isOnEthernet = onEthernet
                 self.currentSSID  = ssid
                 self.log.info("Network change — wifi=\(onWifi) ethernet=\(onEthernet) ssid=\(ssid ?? "nil")")
+
+                let previous = self.lastPrimaryInterfaceFingerprint
+                if let name = primaryInterfaceName, let address = primaryAddress {
+                    self.lastPrimaryInterfaceFingerprint = (name, address)
+                    if let previous, previous.name == name, previous.address != address {
+                        self.log.info("Local IP changed on \(name): \(previous.address) -> \(address)")
+                        await self.onLocalAddressChange?()
+                    }
+                } else {
+                    self.lastPrimaryInterfaceFingerprint = nil
+                }
+
                 await self.onNetworkChange?()
             }
         }
@@ -181,6 +210,32 @@ final class NetworkMonitorService: NSObject, ObservableObject {
               let range = lines[portIndex + 1].range(of: "Device: ")
         else { return nil }
         return String(lines[portIndex + 1][range.upperBound...]).trimmingCharacters(in: .whitespaces)
+    }
+
+    /// The IPv4 address currently bound to a named interface (e.g. "en0"), or nil
+    /// if the interface has none. Used to notice DHCP lease renewals, which change
+    /// the interface's own address without triggering an interface/SSID switch.
+    private nonisolated static func ipv4Address(forInterface interfaceName: String) -> String? {
+        var ifaddrPtr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddrPtr) == 0, let firstAddr = ifaddrPtr else { return nil }
+        defer { freeifaddrs(ifaddrPtr) }
+
+        var pointer: UnsafeMutablePointer<ifaddrs>? = firstAddr
+        while let ifa = pointer {
+            defer { pointer = ifa.pointee.ifa_next }
+            guard let sockaddr = ifa.pointee.ifa_addr, sockaddr.pointee.sa_family == UInt8(AF_INET) else { continue }
+            guard String(cString: ifa.pointee.ifa_name) == interfaceName else { continue }
+
+            var hostBuffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            let result = getnameinfo(
+                sockaddr, socklen_t(sockaddr.pointee.sa_len),
+                &hostBuffer, socklen_t(hostBuffer.count),
+                nil, 0, NI_NUMERICHOST
+            )
+            guard result == 0 else { continue }
+            return String(cString: hostBuffer)
+        }
+        return nil
     }
 
     private nonisolated static func runNetworksetup(_ arguments: [String]) -> String? {

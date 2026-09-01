@@ -8,6 +8,39 @@
         <description>WireTunnels update feed</description>
         <language>en</language>
         <item>
+            <title>Version 1.0.5</title>
+            <pubDate>Mon, 31 Aug 2026 00:00:00 +0000</pubDate>
+            <sparkle:version>6</sparkle:version>
+            <sparkle:shortVersionString>1.0.5</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[
+                <ul>
+                    <li>Tunnels now automatically reconnect when a peer's dynamic-DNS/IP address changes, instead of going silently dead</li>
+                    <li>Fixed an active tunnel not reconnecting after your Mac's local IP renewed via DHCP</li>
+                    <li>Fixed tunnels not reliably reconnecting or auto-connecting/disconnecting after your Mac wakes from sleep</li>
+                    <li>Fixed Allowed IPs occasionally getting mixed up between tunnels after reconnecting</li>
+                    <li>Fixed two tunnels sharing the same server but different ports being incorrectly treated as connected/overlapping together</li>
+                    <li>Fixed the kill switch toggle silently re-arming itself every time you opened a tunnel's details</li>
+                    <li>Fixed several multi-hop issues: reconnecting a lone chain member after disconnecting the chain, On-Demand rules disconnecting an individually-connected chain member, stale DNS left behind after disconnecting a chain, and a lost route after sleep/wake</li>
+                    <li>Multi-hop: a chain member's own On-Demand rule no longer brings up or tears down the whole chain — only that tunnel</li>
+                    <li>Fixed tunnel names being silently truncated to 15 characters — now up to 50</li>
+                    <li>Administrators can now edit a shared tunnel's name and config directly, not just replace the whole file</li>
+                </ul>
+                <p><strong>Notes</strong></p>
+                <ul>
+                    <li>Existing installs will be prompted to update the privileged helper on first launch after upgrading</li>
+                    <li>Multi-hop chains still connect and disconnect as a unit only from the Multi-Hop screen</li>
+                </ul>
+            ]]></description>
+            <enclosure
+                url="https://github.com/FMDigitech/WireTunnels/releases/download/v1.0.5/WireTunnels-1.0.5.dmg"
+                sparkle:edSignature="XIT7/t8hNEqIW2CG5K+Nuss3n8J5tK1EmOfsyrn1ruCx7ZQ1AMzgt32U6DASwKbysKNIOEQtkdcu6Grf92rpDQ=="
+                length="14145648"
+                type="application/octet-stream"
+            />
+        </item>
+
+        <item>
             <title>Version 1.0</title>
             <pubDate>Sun, 06 Jul 2026 00:00:00 +0000</pubDate>
             <sparkle:version>1</sparkle:version>

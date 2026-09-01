@@ -34,7 +34,7 @@ final class ConfigStorageService {
             .map { allowed.contains($0) ? Character($0) : "_" }
             .reduce("") { $0 + String($1) }
         let traversalSafe = sanitized.replacingOccurrences(of: "..", with: "__")
-        return String(traversalSafe.prefix(15))
+        return String(traversalSafe.prefix(50))
     }
 
     /// Save config content as a new file

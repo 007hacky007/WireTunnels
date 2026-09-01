@@ -714,6 +714,15 @@ struct TunnelDetailView: View {
                 }
                 .buttonStyle(.bordered)
             } else {
+                if tunnelManager.currentUserIsAdministrator {
+                    Button {
+                        showingEditor = true
+                    } label: {
+                        Label("Edit Config", systemImage: "pencil")
+                    }
+                    .buttonStyle(.bordered)
+                }
+
                 Button {
                     showingManagedReplacement = true
                 } label: {

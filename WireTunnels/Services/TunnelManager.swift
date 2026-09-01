@@ -38,6 +38,11 @@ final class TunnelManager: ObservableObject {
     private var pollingTask: Task<Void, Never>?
     private var networkCancellable: AnyCancellable?
     private var networkChangeDebounceTask: Task<Void, Never>?
+    private var localAddressChangeDebounceTask: Task<Void, Never>?
+    /// Guards against overlapping restart passes — a DHCP renewal detected right
+    /// around a system wake would otherwise trigger two concurrent stop/start
+    /// cycles on the same tunnel interfaces.
+    private var isRestartingActiveTunnelInterfaces = false
     private var connectingTunnels: Set<UUID> = []
     private var connectingChains: Set<UUID> = []
     private var statusFailureReported = false
@@ -77,6 +82,16 @@ final class TunnelManager: ObservableObject {
         }
         networkMonitor.onSystemWake = { [weak self] in
             await self?.handleSystemWake()
+        }
+        networkMonitor.onLocalAddressChange = { [weak self] in
+            // Same debounce reasoning as onNetworkChange above — coalesce the
+            // handful of path updates a single DHCP renewal tends to produce.
+            self?.localAddressChangeDebounceTask?.cancel()
+            self?.localAddressChangeDebounceTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                guard !Task.isCancelled else { return }
+                await self?.handleLocalAddressChange()
+            }
         }
         Task { await initialize() }
     }
@@ -691,13 +706,28 @@ final class TunnelManager: ObservableObject {
     func updateTunnel(_ tunnel: Tunnel, name: String, configContent: String) async throws {
         guard let index = tunnels.firstIndex(where: { $0.id == tunnel.id }) else { return }
         let liveTunnel = tunnels[index]
-        guard liveTunnel.scope == .personal else {
-            throw CommandError.managedTunnelFailed("Managed tunnels must be edited by an administrator")
-        }
         let parsed = parser.parse(string: configContent)
         guard parsed.isValid else {
             throw ConfigManagementError.invalidConfiguration(parsed.validationErrors)
         }
+
+        if liveTunnel.scope == .managed {
+            guard currentUserIsAdministrator else {
+                throw CommandError.managedTunnelFailed("Only an administrator can edit a shared tunnel.")
+            }
+            try await commandService.updateManagedTunnel(
+                id: liveTunnel.id,
+                name: name,
+                contents: configContent.data(using: .utf8),
+                policy: liveTunnel.managedPolicy ?? ManagedTunnelPolicy(),
+                autoConnectRule: liveTunnel.autoConnectRule
+            )
+            await loadManagedTunnels()
+            updateWarnings()
+            log.info("Updated shared tunnel: \(name)")
+            return
+        }
+
         let isSameConfig = name == liveTunnel.name
         let savedURL = try configStorage.saveConfig(
             name: name,
@@ -821,22 +851,40 @@ final class TunnelManager: ObservableObject {
         // sleep). So a name match is only trusted once we've confirmed the interface's
         // peer key still belongs to this tunnel; otherwise fall back to searching by
         // peer key, which is what actually identifies the tunnel.
+        //
+        // Peer public key alone isn't always unique, though: a server operator can
+        // reuse the same WireGuard keypair across multiple listening ports to serve
+        // distinct configs (e.g. "Endpoint = x.x.x.x:443" and "x.x.x.x:4443" for two
+        // different tunnels). When a candidate match's live endpoint port doesn't
+        // agree with this tunnel's own configured port, it belongs to that other
+        // tunnel, not this one.
         var updatedTunnels = tunnels
         for index in updatedTunnels.indices {
             let iface = updatedTunnels[index].interfaceName
                 ?? URL(fileURLWithPath: updatedTunnels[index].configPath)
                 .deletingPathExtension().lastPathComponent
             let peerKey = updatedTunnels[index].publicKey
+            let configuredPort = updatedTunnels[index].endpoint.flatMap { Self.parseEndpoint($0)?.port }
             let byName = statusMonitor.statusMap[iface]
 
+            func isOurs(_ status: TunnelStatus) -> Bool {
+                guard let peerKey else { return false }
+                return status.peers.contains { peer in
+                    guard peer.publicKey == peerKey else { return false }
+                    guard let configuredPort,
+                          let peerPort = peer.endpoint.flatMap({ Self.parseEndpoint($0)?.port }) else {
+                        return true
+                    }
+                    return peerPort == configuredPort
+                }
+            }
+
             let status: TunnelStatus?
-            if let peerKey {
-                let byNameIsOurs = byName.map { $0.peers.contains { $0.publicKey == peerKey } } ?? false
+            if peerKey != nil {
+                let byNameIsOurs = byName.map(isOurs) ?? false
                 status = byNameIsOurs
                     ? byName
-                    : statusMonitor.statusMap.values.first(where: { s in
-                        s.peers.contains { $0.publicKey == peerKey }
-                    })
+                    : statusMonitor.statusMap.values.first(where: isOurs)
             } else {
                 // No known peer key to verify against (e.g. not parsed yet) — fall
                 // back to trusting the name match, as before.
@@ -895,6 +943,10 @@ final class TunnelManager: ObservableObject {
         // Refresh the shared managed-tunnel list roughly every 10s so policy/on-demand
         // changes made by an administrator reach other users' already-running sessions.
         let managedRefreshEveryNTicks = max(1, Int(10.0 / interval))
+        // Endpoint DNS re-resolution is a DNS lookup per active tunnel, so it runs far
+        // less often than the status poll — roughly once a minute is enough to catch a
+        // DDNS change without hammering a resolver.
+        let endpointRecheckEveryNTicks = max(1, Int(60.0 / interval))
         pollingTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
@@ -911,6 +963,9 @@ final class TunnelManager: ObservableObject {
                 tick += 1
                 if tick % managedRefreshEveryNTicks == 0 {
                     await self.loadManagedTunnels()
+                }
+                if self.hasActiveTunnels && tick % endpointRecheckEveryNTicks == 0 {
+                    await self.checkEndpointReResolution()
                 }
             }
         }
@@ -996,34 +1051,9 @@ final class TunnelManager: ObservableObject {
         try? await Task.sleep(nanoseconds: 2_000_000_000)
         guard !isLoading, !needsSetup else { return }
 
-        let activeTunnels = tunnels.filter { $0.isActive }
-        if !activeTunnels.isEmpty {
-            log.info("System wake: reconnecting \(activeTunnels.count) active tunnel(s)")
-
-            await withTaskGroup(of: Void.self) { group in
-                for tunnel in activeTunnels {
-                    group.addTask { [weak self] in
-                        await self?.reconnectAfterWake(tunnel)
-                    }
-                }
-            }
-
-            await refreshStatus()
-            // Re-arm (idempotent) any kill-switch tunnel that's active again — the
-            // interface name/endpoint may have changed across the reconnect.
-            for tunnel in tunnels where tunnel.isActive && tunnel.isKillSwitchEnabled {
-                await armKillSwitch(for: tunnel)
-            }
-            // Re-derive exclusion routes too — the default gateway/interface can
-            // change across sleep just like the kill switch's interface/endpoint.
-            for tunnel in tunnels where tunnel.isActive && !tunnel.excludedRoutes.isEmpty {
-                await syncExcludedRoutes(for: tunnel)
-            }
-            // Same reasoning for hop chains — each leg's interfaceName can change
-            // across the restart above, so the host route needs re-deriving too.
-            for chain in hopChains where chain.isEnabled {
-                await reconnectHopChainAfterWake(chain)
-            }
+        if tunnels.contains(where: { $0.isActive }) {
+            log.info("System wake: reconnecting active tunnel(s)")
+            await restartActiveTunnelInterfaces()
             log.info("System wake: reconnect pass complete")
         }
 
@@ -1032,6 +1062,107 @@ final class TunnelManager: ObservableObject {
         // update (no interface change to report), so this is the only place that
         // would otherwise catch a tunnel that should auto-connect/disconnect now.
         await handleNetworkChange()
+    }
+
+    /// Called when the primary interface's own IP address changes without an
+    /// interface/SSID switch (a DHCP lease renewal). `handleNetworkChange()` alone
+    /// doesn't cover this: it only re-evaluates On-Demand connect/disconnect rules,
+    /// which don't fire when the matched network hasn't actually changed. Left
+    /// alone, an already-active tunnel's WireGuard socket stays bound to the old
+    /// local address and silently stops passing traffic — exactly the "tunnel
+    /// shows connected but errors until I manually reconnect" symptom this fixes.
+    func handleLocalAddressChange() async {
+        guard !isLoading, !needsSetup else { return }
+        guard tunnels.contains(where: { $0.isActive }) else { return }
+        log.info("Local IP address renewed: reconnecting active tunnel(s)")
+        await restartActiveTunnelInterfaces()
+        log.info("Local IP address change: reconnect pass complete")
+    }
+
+    /// Restarts currently-active tunnels' interfaces and re-derives the
+    /// kill-switch/exclusion-route/hop-chain state that depends on an interface
+    /// name or the default gateway — both of which can change out from under an
+    /// active tunnel across a system wake, a DHCP lease renewal, or a peer's DDNS
+    /// record changing.
+    ///
+    /// `onlyTunnelIDs`, when given, scopes the restart to those tunnels instead of
+    /// every active one. A system wake or a local IP renewal is a genuinely global
+    /// network event, so every active tunnel is plausibly affected — but a single
+    /// peer's DNS record changing only affects tunnels connected to that peer, and
+    /// bouncing unrelated tunnels for it would be a needless connectivity blip
+    /// (including tripping their kill switch for no reason).
+    private func restartActiveTunnelInterfaces(onlyTunnelIDs: Set<UUID>? = nil) async {
+        guard !isRestartingActiveTunnelInterfaces else { return }
+        isRestartingActiveTunnelInterfaces = true
+        defer { isRestartingActiveTunnelInterfaces = false }
+
+        func isInScope(_ id: UUID) -> Bool { onlyTunnelIDs?.contains(id) ?? true }
+
+        let activeTunnels = tunnels.filter { $0.isActive && isInScope($0.id) }
+        guard !activeTunnels.isEmpty else { return }
+
+        await withTaskGroup(of: Void.self) { group in
+            for tunnel in activeTunnels {
+                group.addTask { [weak self] in
+                    await self?.reconnectAfterWake(tunnel)
+                }
+            }
+        }
+
+        await refreshStatus()
+        // Re-arm (idempotent) any kill-switch tunnel that's active again — the
+        // interface name/endpoint may have changed across the reconnect.
+        for tunnel in tunnels where tunnel.isActive && tunnel.isKillSwitchEnabled && isInScope(tunnel.id) {
+            await armKillSwitch(for: tunnel)
+        }
+        // Re-derive exclusion routes too — the default gateway/interface can
+        // change across the restart just like the kill switch's interface/endpoint.
+        for tunnel in tunnels where tunnel.isActive && !tunnel.excludedRoutes.isEmpty && isInScope(tunnel.id) {
+            await syncExcludedRoutes(for: tunnel)
+        }
+        // Same reasoning for hop chains — each leg's interfaceName can change
+        // across the restart above, so the host route needs re-deriving too. Left
+        // unscoped: a chain's two tunnel IDs aren't worth cross-referencing against
+        // onlyTunnelIDs here, and re-syncing an unaffected chain's route is a cheap,
+        // idempotent no-op rather than a real interface bounce.
+        for chain in hopChains where chain.isEnabled {
+            await reconnectHopChainAfterWake(chain)
+        }
+    }
+
+    /// Re-resolves each active tunnel's configured `Endpoint` hostname and
+    /// restarts any tunnel whose currently-live endpoint (frozen in the kernel
+    /// interface since connect, as reported by `wg show` into `tunnel.endpoint`)
+    /// no longer matches a fresh lookup. This is the server-side mirror of
+    /// `handleLocalAddressChange()` above: wg-quick only resolves `Endpoint =`
+    /// once at connect time, so a peer behind DDNS/dynamic DNS whose public IP
+    /// changes while the tunnel is still "connected" goes silently dead — the
+    /// kernel interface keeps sending to the stale address — until reconnected.
+    /// A literal-IP endpoint always re-resolves to itself, so static-IP tunnels
+    /// never trigger a restart here.
+    private func checkEndpointReResolution() async {
+        guard !isLoading, !needsSetup else { return }
+
+        var changedTunnelIDs: Set<UUID> = []
+        for tunnel in tunnels where tunnel.isActive {
+            guard let liveEndpoint = tunnel.endpoint,
+                  let liveHost = Self.parseEndpoint(liveEndpoint)?.host else { continue }
+            let configPath = tunnel.runtimeConfigPath ?? tunnel.configPath
+            guard let configuredEndpoint = (try? parser.parse(contentsOf: URL(fileURLWithPath: configPath)))?.endpoint,
+                  let configuredHost = Self.parseEndpoint(configuredEndpoint)?.host else { continue }
+            let resolved = await Task.detached {
+                Self.resolveIPLiteral(configuredHost)
+            }.value
+            guard let freshlyResolved = resolved else { continue }
+            if freshlyResolved != liveHost {
+                log.info("Endpoint for \(tunnel.name) changed: \(liveHost) -> \(freshlyResolved) (host: \(configuredHost))")
+                changedTunnelIDs.insert(tunnel.id)
+            }
+        }
+
+        guard !changedTunnelIDs.isEmpty else { return }
+        log.info("DDNS/endpoint address changed for \(changedTunnelIDs.count) tunnel(s); restarting")
+        await restartActiveTunnelInterfaces(onlyTunnelIDs: changedTunnelIDs)
     }
 
     private func reconnectAfterWake(_ tunnel: Tunnel) async {
