@@ -3,8 +3,8 @@ import Darwin
 import Foundation
 import Security
 
-private let helperVersionNumber = "1.0.5"
-private let helperProtocolRevisionValue = "route-sync-v1"
+private let helperVersionNumber = "1.0.6"
+private let helperProtocolRevisionValue = "split-dns-v1"
 private let applicationIdentifier = "com.fmdigitech.WireTunnels"
 private let applicationTeamIdentifier = "48W4Z4X56T"
 private let systemRoot = URL(fileURLWithPath: "/Library/Application Support/WireTunnels")
@@ -15,6 +15,7 @@ private let managedConfigDir = managedRoot.appendingPathComponent("configs", isD
 private let managedMetadataDir = managedRoot.appendingPathComponent("metadata", isDirectory: true)
 private let managedMetadataFile = managedMetadataDir.appendingPathComponent("tunnels.json", isDirectory: false)
 private let managedConnectedUsersFile = managedMetadataDir.appendingPathComponent("connected-users.json", isDirectory: false)
+private let systemSettingsFile = managedMetadataDir.appendingPathComponent("settings.json", isDirectory: false)
 private let legacySystemRoot = URL(fileURLWithPath: "/Library/Application Support/WireguardTunnels")
 private let legacyRuntimeConfigDirs = [
     legacySystemRoot.appendingPathComponent("runtime", isDirectory: true),
@@ -135,21 +136,37 @@ private struct ManagedAutoConnectRule: Codable, Equatable {
     }
 }
 
+private struct SystemSettings: Codable, Equatable {
+    var requireAdminToDisableLaunchAtLogin: Bool
+
+    init(requireAdminToDisableLaunchAtLogin: Bool = false) {
+        self.requireAdminToDisableLaunchAtLogin = requireAdminToDisableLaunchAtLogin
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        requireAdminToDisableLaunchAtLogin = try container.decodeIfPresent(Bool.self, forKey: .requireAdminToDisableLaunchAtLogin) ?? false
+    }
+}
+
 private struct ManagedTunnelPolicy: Codable, Equatable {
     var usersCanConnect: Bool
     var usersCanDisconnect: Bool
     var killSwitchEnabled: Bool
+    var splitDNSDomains: [String]
 
     private enum CodingKeys: String, CodingKey {
         case usersCanConnect
         case usersCanDisconnect
         case killSwitchEnabled
+        case splitDNSDomains
     }
 
-    init(usersCanConnect: Bool = true, usersCanDisconnect: Bool = true, killSwitchEnabled: Bool = false) {
+    init(usersCanConnect: Bool = true, usersCanDisconnect: Bool = true, killSwitchEnabled: Bool = false, splitDNSDomains: [String] = []) {
         self.usersCanConnect = usersCanConnect
         self.usersCanDisconnect = usersCanDisconnect
         self.killSwitchEnabled = killSwitchEnabled
+        self.splitDNSDomains = splitDNSDomains
     }
 
     init(from decoder: Decoder) throws {
@@ -157,7 +174,14 @@ private struct ManagedTunnelPolicy: Codable, Equatable {
         usersCanConnect = try container.decodeIfPresent(Bool.self, forKey: .usersCanConnect) ?? true
         usersCanDisconnect = try container.decodeIfPresent(Bool.self, forKey: .usersCanDisconnect) ?? true
         killSwitchEnabled = try container.decodeIfPresent(Bool.self, forKey: .killSwitchEnabled) ?? false
+        splitDNSDomains = try container.decodeIfPresent([String].self, forKey: .splitDNSDomains) ?? []
     }
+}
+
+private struct SplitDNSEntry: Codable {
+    let ownerId: String
+    let domains: [String]
+    let servers: [String]
 }
 
 private struct KillSwitchEntry: Codable {
@@ -217,6 +241,7 @@ private struct ManagedTunnelRecord: Codable, Equatable, Identifiable {
     var dns: [String]
     var endpoint: String?
     var publicKey: String?
+    var localPublicKey: String?
     var lastHandshake: Date?
     var rxBytes: Int64
     var txBytes: Int64
@@ -239,12 +264,70 @@ private struct SanitizedConfigMetadata {
     var dns: [String]
     var endpoint: String?
     var publicKey: String?
+    var localPublicKey: String?
 }
 
 private struct ClientUser {
     let uid: Int
     let username: String
 }
+
+// BEGIN ResolverStore
+/// File-level split DNS handling for /etc/resolver, parameterised on directory and
+/// ownership marker so it can be exercised against a temporary directory.
+private enum ResolverStore {
+    /// A file is ours only if it is a regular file (not a symlink) whose first line is `marker`.
+    static func isOurs(_ path: String, marker: String) -> Bool {
+        var info = stat()
+        guard lstat(path, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG,
+              let handle = FileHandle(forReadingAtPath: path) else { return false }
+        defer { try? handle.close() }
+        let head = handle.readData(ofLength: 256)
+        return String(decoding: head, as: UTF8.self).hasPrefix(marker + "\n")
+    }
+
+    /// Makes `directory` contain exactly `desired` (domain -> nameservers) among the
+    /// files owned by `marker`. Files owned by anyone else are never modified or
+    /// removed; a desired domain they already cover is returned as a conflict.
+    static func sync(
+        desired: [String: [String]],
+        directory: String,
+        marker: String,
+        fileManager: FileManager
+    ) -> (conflicts: [String], failure: String?) {
+        var conflicts: [String] = []
+        if !desired.isEmpty {
+            try? fileManager.createDirectory(
+                atPath: directory, withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o755]
+            )
+        }
+        for (domain, servers) in desired {
+            let path = "\(directory)/\(domain)"
+            var info = stat()
+            let exists = lstat(path, &info) == 0
+            if exists, !isOurs(path, marker: marker) {
+                conflicts.append(domain)
+                continue
+            }
+            let body = ([marker] + servers.map { "nameserver \($0)" }).joined(separator: "\n") + "\n"
+            do {
+                try body.write(toFile: path, atomically: true, encoding: .utf8)
+                try fileManager.setAttributes([.posixPermissions: 0o644], ofItemAtPath: path)
+            } catch {
+                return (conflicts, "Unable to write resolver for \(domain): \(error.localizedDescription)")
+            }
+        }
+        if let existing = try? fileManager.contentsOfDirectory(atPath: directory) {
+            for name in existing where desired[name] == nil {
+                let path = "\(directory)/\(name)"
+                if isOurs(path, marker: marker) { try? fileManager.removeItem(atPath: path) }
+            }
+        }
+        return (conflicts, nil)
+    }
+}
+// END ResolverStore
 
 private enum ConfigName {
     static func sanitize(_ name: String) -> String {
@@ -258,7 +341,44 @@ private enum ConfigName {
             .map { allowed.contains($0) ? Character($0) : "_" }
             .reduce("") { $0 + String($1) }
             .replacingOccurrences(of: "..", with: "__")
-        return String(sanitized.prefix(15))
+        return String(sanitized.prefix(50))
+    }
+
+    /// Interface-safe file name (macOS limits interface names to 15 bytes). Must stay
+    /// identical to ConfigStorageService.fileBaseName so personal and shared tunnels agree.
+    static func fileBaseName(_ displayName: String) -> String {
+        guard displayName.utf8.count > 15 else { return displayName }
+        var hash: UInt32 = 2166136261
+        for byte in displayName.utf8 {
+            hash = (hash ^ UInt32(byte)) &* 16777619
+        }
+        let suffix = String(format: "%06x", hash & 0xFFFFFF)
+        return "\(displayName.prefix(15 - suffix.count - 1))-\(suffix)"
+    }
+
+    static func publicKey(fromPrivateKey privateKey: String) -> String? {
+        guard let raw = Data(base64Encoded: privateKey.trimmingCharacters(in: .whitespacesAndNewlines)),
+              raw.count == 32,
+              let key = try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: raw) else { return nil }
+        return key.publicKey.rawRepresentation.base64EncodedString()
+    }
+
+    /// Removes `DNS =` from [Interface] so wg-quick doesn't set DNS system-wide.
+    static func strippingDNS(from contents: Data) -> Data {
+        guard let text = String(data: contents, encoding: .utf8) else { return contents }
+        var inInterface = false
+        let lines = text.components(separatedBy: "\n").filter { line in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("[") {
+                inInterface = trimmed.caseInsensitiveCompare("[Interface]") == .orderedSame
+                return true
+            }
+            guard inInterface else { return true }
+            let key = trimmed.split(separator: "=", maxSplits: 1).first?
+                .trimmingCharacters(in: .whitespaces) ?? ""
+            return key.caseInsensitiveCompare("DNS") != .orderedSame
+        }
+        return Data(lines.joined(separator: "\n").utf8)
     }
 
     static func nonEmptyList(_ value: String) -> [String] {
@@ -444,15 +564,93 @@ private final class HelperSession: NSObject, WireguardHelperProtocol {
         }
     }
 
+    /// `wg show all dump` prints each interface's private key in its second column;
+    /// the app only needs the public key, so never send the private one over XPC.
+    private static func redactingPrivateKeys(in dump: String) -> String {
+        dump.components(separatedBy: "\n").map { line in
+            var fields = line.components(separatedBy: "\t")
+            if fields.count == 5 { fields[1] = "(hidden)" }
+            return fields.joined(separator: "\t")
+        }.joined(separator: "\n")
+    }
+
     func runWgShow(reply: @escaping (String?, String?) -> Void) {
         let result = runCommand(
             executable: systemBinDir.appendingPathComponent("wg"),
             arguments: ["show", "all", "dump"]
         )
         if result.exitCode == 0 {
-            reply(result.stdout, nil)
+            reply(Self.redactingPrivateKeys(in: result.stdout), nil)
         } else {
             reply(nil, result.stderr.isEmpty ? "wg show failed" : result.stderr)
+        }
+    }
+
+    private static let resolverDirectory = "/etc/resolver"
+    private static let resolverMarkerPrefix = "# Managed by WireTunnels"
+
+    static func isValidResolverDomain(_ value: String) -> Bool {
+        guard (1...253).contains(value.utf8.count),
+              !value.hasPrefix("."), !value.hasSuffix("."), !value.hasPrefix("-"),
+              !value.contains(".."),
+              value.unicodeScalars.allSatisfy({
+                CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789.-").contains($0)
+              }) else { return false }
+        return true
+    }
+
+    /// Makes /etc/resolver match `entries` exactly, for the files this app owns.
+    /// Ownership is a marker line; resolver files written by anyone else are never
+    /// modified or removed, and a domain they already cover is reported as a conflict.
+    func syncSplitDNS(entries: Data, reply: @escaping (Bool, String?) -> Void) {
+        let decoded: [SplitDNSEntry]
+        do {
+            decoded = try JSONDecoder().decode([SplitDNSEntry].self, from: entries)
+        } catch {
+            reply(false, "Invalid split DNS request")
+            return
+        }
+
+        var desired: [String: [String]] = [:]
+        for entry in decoded {
+            guard (1...32).contains(entry.domains.count), (1...8).contains(entry.servers.count) else {
+                reply(false, "Invalid split DNS entry")
+                return
+            }
+            for domain in entry.domains {
+                guard Self.isValidResolverDomain(domain) else {
+                    reply(false, "Invalid split DNS domain: \(domain)")
+                    return
+                }
+            }
+            for server in entry.servers {
+                guard Self.isValidIPLiteral(server) else {
+                    reply(false, "Invalid split DNS server: \(server)")
+                    return
+                }
+            }
+            for domain in entry.domains where desired[domain] == nil {
+                desired[domain] = entry.servers
+            }
+        }
+
+        // Each user's app syncs its own view of the active tunnels, so ownership is per
+        // uid: one user's sync must not delete another user's resolvers.
+        let marker = "\(Self.resolverMarkerPrefix) (uid \(clientUser.uid))"
+        let result = ResolverStore.sync(
+            desired: desired, directory: Self.resolverDirectory, marker: marker, fileManager: fileManager
+        )
+        if let failure = result.failure {
+            reply(false, failure)
+            return
+        }
+        let conflicts = result.conflicts
+
+        _ = runCommand(executable: URL(fileURLWithPath: "/usr/bin/dscacheutil"), arguments: ["-flushcache"])
+        if conflicts.isEmpty {
+            reply(true, nil)
+        } else {
+            reply(false, "Existing resolver configuration for \(conflicts.sorted().joined(separator: ", ")) was left untouched")
         }
     }
 
@@ -728,7 +926,19 @@ private final class HelperSession: NSObject, WireguardHelperProtocol {
     func listManagedTunnels(reply: @escaping (Data?, String?) -> Void) {
         do {
             try ensureManagedStore()
-            let records = try loadManagedRecords()
+            var records = try loadManagedRecords()
+            // Records saved before the client key was tracked: derive it from the root-owned config.
+            var backfilled = false
+            for index in records.indices where records[index].localPublicKey == nil {
+                let url = URL(fileURLWithPath: records[index].configPath)
+                if (try? validateManagedConfigFile(url)) != nil,
+                   let contents = try? Data(contentsOf: url),
+                   let key = try? sanitizedMetadata(from: contents).localPublicKey {
+                    records[index].localPublicKey = key
+                    backfilled = true
+                }
+            }
+            if backfilled { try? saveManagedRecords(records) }
             let encoder = JSONEncoder()
             encoder.dateEncodingStrategy = .iso8601
             reply(try encoder.encode(records), nil)
@@ -748,7 +958,7 @@ private final class HelperSession: NSObject, WireguardHelperProtocol {
             guard contents.count <= maximumConfigSize else { throw HelperError.invalidConfig }
             try validateConfigContents(contents)
             let safeBaseName = ConfigName.sanitize(name)
-            guard let safeName = validatedConfigName("\(safeBaseName).conf") else {
+            guard let safeName = validatedConfigName("\(ConfigName.fileBaseName(safeBaseName)).conf") else {
                 throw HelperError.invalidConfigName
             }
             try ensureManagedStore()
@@ -780,6 +990,7 @@ private final class HelperSession: NSObject, WireguardHelperProtocol {
                 dns: metadata.dns,
                 endpoint: metadata.endpoint,
                 publicKey: metadata.publicKey,
+                localPublicKey: metadata.localPublicKey,
                 lastHandshake: nil,
                 rxBytes: 0,
                 txBytes: 0,
@@ -816,13 +1027,20 @@ private final class HelperSession: NSObject, WireguardHelperProtocol {
             let decoder = JSONDecoder()
             let decodedPolicy = try decoder.decode(ManagedTunnelPolicy.self, from: policy)
             let decodedRule = try decoder.decode(ManagedAutoConnectRule.self, from: autoConnectRule)
+            guard decodedPolicy.splitDNSDomains.count <= 32,
+                  decodedPolicy.splitDNSDomains.allSatisfy({ Self.isValidResolverDomain($0) }) else {
+                throw HelperError.invalidConfig
+            }
             let safeBaseName = ConfigName.sanitize(name)
-            guard let safeName = validatedConfigName("\(safeBaseName).conf") else {
+            guard let safeName = validatedConfigName("\(ConfigName.fileBaseName(safeBaseName)).conf") else {
                 throw HelperError.invalidConfigName
             }
 
             let oldConfigURL = URL(fileURLWithPath: records[index].configPath)
             let newConfigURL = managedConfigDir.appendingPathComponent(safeName, isDirectory: false)
+            guard !records.contains(where: { $0.id != records[index].id && $0.configPath == newConfigURL.path }) else {
+                throw HelperError.managedTunnelExists
+            }
             let metadata: SanitizedConfigMetadata?
             if let contents {
                 guard contents.count <= maximumConfigSize else { throw HelperError.invalidConfig }
@@ -858,6 +1076,7 @@ private final class HelperSession: NSObject, WireguardHelperProtocol {
                 records[index].dns = metadata.dns
                 records[index].endpoint = metadata.endpoint
                 records[index].publicKey = metadata.publicKey
+                records[index].localPublicKey = metadata.localPublicKey
             }
             records[index].updatedAt = Date()
             try saveManagedRecords(records)
@@ -892,6 +1111,27 @@ private final class HelperSession: NSObject, WireguardHelperProtocol {
         }
     }
 
+    func getSystemSettings(reply: @escaping (Data?, String?) -> Void) {
+        do {
+            try ensureManagedStore()
+            reply(try JSONEncoder().encode(try loadSystemSettings()), nil)
+        } catch {
+            reply(nil, error.localizedDescription)
+        }
+    }
+
+    func setSystemSettings(settings: Data, authorization: Data, reply: @escaping (Bool, String?) -> Void) {
+        do {
+            try validateAdminAuthorization(authorization)
+            try ensureManagedStore()
+            let decoded = try JSONDecoder().decode(SystemSettings.self, from: settings)
+            try saveSystemSettings(decoded)
+            reply(true, nil)
+        } catch {
+            reply(false, error.localizedDescription)
+        }
+    }
+
     func stageManagedConfig(id: String, reply: @escaping (String?, String?) -> Void) {
         do {
             try ensureManagedStore()
@@ -902,8 +1142,11 @@ private final class HelperSession: NSObject, WireguardHelperProtocol {
             }
             let source = URL(fileURLWithPath: record.configPath)
             try validateManagedConfigFile(source)
-            let contents = try Data(contentsOf: source, options: .mappedIfSafe)
+            var contents = try Data(contentsOf: source, options: .mappedIfSafe)
             try validateConfigContents(contents)
+            if !(record.managedPolicy?.splitDNSDomains.isEmpty ?? true) {
+                contents = ConfigName.strippingDNS(from: contents)
+            }
             try createDirectory(runtimeConfigDir, permissions: 0o700)
             let destination = runtimeConfigDir.appendingPathComponent(source.lastPathComponent, isDirectory: false)
             try writeRuntimeConfig(contents, to: destination)
@@ -1118,6 +1361,10 @@ private final class HelperSession: NSObject, WireguardHelperProtocol {
             try validateRegularFile(managedConnectedUsersFile, expectedSize: nil)
             try validateRootOwnedFile(managedConnectedUsersFile)
         }
+        if fileManager.fileExists(atPath: systemSettingsFile.path) {
+            try validateRegularFile(systemSettingsFile, expectedSize: nil)
+            try validateRootOwnedFile(systemSettingsFile)
+        }
     }
 
     private func loadManagedRecords() throws -> [ManagedTunnelRecord] {
@@ -1128,6 +1375,32 @@ private final class HelperSession: NSObject, WireguardHelperProtocol {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return try decoder.decode([ManagedTunnelRecord].self, from: data)
+    }
+
+    private func loadSystemSettings() throws -> SystemSettings {
+        guard fileManager.fileExists(atPath: systemSettingsFile.path) else { return SystemSettings() }
+        try validateRegularFile(systemSettingsFile, expectedSize: nil)
+        try validateRootOwnedFile(systemSettingsFile)
+        let data = try Data(contentsOf: systemSettingsFile, options: .mappedIfSafe)
+        return try JSONDecoder().decode(SystemSettings.self, from: data)
+    }
+
+    private func saveSystemSettings(_ settings: SystemSettings) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(settings)
+        let temporary = managedMetadataDir.appendingPathComponent(".settings-\(UUID().uuidString).tmp")
+        try data.write(to: temporary, options: [.atomic])
+        try fileManager.setAttributes([
+            .posixPermissions: 0o644,
+            .ownerAccountID: 0,
+            .groupOwnerAccountID: 0
+        ], ofItemAtPath: temporary.path)
+        if fileManager.fileExists(atPath: systemSettingsFile.path) {
+            _ = try fileManager.replaceItemAt(systemSettingsFile, withItemAt: temporary)
+        } else {
+            try fileManager.moveItem(at: temporary, to: systemSettingsFile)
+        }
     }
 
     private func saveManagedRecords(_ records: [ManagedTunnelRecord]) throws {
@@ -1258,6 +1531,7 @@ private final class HelperSession: NSObject, WireguardHelperProtocol {
         var dns: [String] = []
         var endpoint: String?
         var publicKey: String?
+        var localPublicKey: String?
 
         for rawLine in text.components(separatedBy: .newlines) {
             let line = rawLine.trimmingCharacters(in: .whitespaces)
@@ -1275,6 +1549,7 @@ private final class HelperSession: NSObject, WireguardHelperProtocol {
                 switch key {
                 case "address": address = ConfigName.nonEmptyList(value)
                 case "dns": dns = ConfigName.nonEmptyList(value)
+                case "privatekey": localPublicKey = ConfigName.publicKey(fromPrivateKey: value)
                 default: break
                 }
             } else if section == "[peer]" && peerCount == 1 {
@@ -1295,7 +1570,8 @@ private final class HelperSession: NSObject, WireguardHelperProtocol {
             allowedIPs: allowedIPs,
             dns: dns,
             endpoint: endpoint,
-            publicKey: publicKey
+            publicKey: publicKey,
+            localPublicKey: localPublicKey
         )
     }
 

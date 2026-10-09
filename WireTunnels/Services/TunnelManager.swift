@@ -19,6 +19,7 @@ final class TunnelManager: ObservableObject {
     @Published var isInitialized: Bool = false
     @Published var trafficHistory: [UUID: [TrafficSample]] = [:]
     @Published var hopChains: [HopChain] = []
+    @Published var systemSettings = SystemSettings()
     let currentUserIsAdministrator = TunnelManager.currentUserIsAdministrator()
 
     private var trafficSnapshots: [UUID: (rx: Int64, tx: Int64, time: Date)] = [:]
@@ -62,6 +63,7 @@ final class TunnelManager: ObservableObject {
     /// rules it was actually armed with, rather than silently losing its entry
     /// the next time any other tunnel's kill switch state changes.
     private var killSwitchLastKnownEntry: [UUID: KillSwitchEntry] = [:]
+    private var lastSyncedSplitDNS: [SplitDNSEntry]?
 
     // MARK: - Initialization
 
@@ -115,7 +117,7 @@ final class TunnelManager: ObservableObject {
 
         // Backfill publicKey / address for tunnels saved before these fields were populated
         var needsSave = false
-        for index in tunnels.indices where tunnels[index].publicKey == nil || tunnels[index].address == nil {
+        for index in tunnels.indices where tunnels[index].publicKey == nil || tunnels[index].address == nil || tunnels[index].localPublicKey == nil {
             if let parsed = try? parser.parse(contentsOf: URL(fileURLWithPath: tunnels[index].configPath)) {
                 if tunnels[index].publicKey == nil, let key = parsed.peerPublicKey {
                     tunnels[index].publicKey = key
@@ -123,6 +125,11 @@ final class TunnelManager: ObservableObject {
                 }
                 if tunnels[index].address == nil {
                     tunnels[index].address = parsed.address
+                    needsSave = true
+                }
+                if tunnels[index].localPublicKey == nil,
+                   let key = parsed.privateKey.flatMap({ WireGuardKey.publicKey(fromPrivateKey: $0) }) {
+                    tunnels[index].localPublicKey = key
                     needsSave = true
                 }
             }
@@ -234,6 +241,7 @@ final class TunnelManager: ObservableObject {
         killSwitchArmedTunnelIDs.removeAll()
         killSwitchLastKnownEntry.removeAll()
         await syncKillSwitchState()
+        await syncSplitDNSState()
         for tunnel in tunnels where tunnel.isActive && tunnel.isKillSwitchEnabled {
             await armKillSwitch(for: tunnel)
         }
@@ -526,7 +534,9 @@ final class TunnelManager: ObservableObject {
             } else {
                 var sourcePath = liveTunnel.configPath
                 var dnsStrippedTempURL: URL?
-                if suppressSystemDNS {
+                // Split DNS replaces the system-wide DNS wg-quick would set with
+                // domain-scoped resolvers installed by the helper after connect.
+                if suppressSystemDNS || !liveTunnel.effectiveSplitDNSDomains.isEmpty {
                     let tempURL = try Self.writeConfigWithoutDNS(from: liveTunnel.configPath)
                     dnsStrippedTempURL = tempURL
                     sourcePath = tempURL.path
@@ -559,6 +569,7 @@ final class TunnelManager: ObservableObject {
             if !tunnels[index].excludedRoutes.isEmpty {
                 await syncExcludedRoutes(for: tunnels[index])
             }
+            await syncSplitDNSState()
             log.info("Tunnel \(liveTunnel.name) connected")
             try? await notificationService.postConnected(tunnelName: liveTunnel.name)
         } catch {
@@ -614,6 +625,7 @@ final class TunnelManager: ObservableObject {
             trafficSnapshots.removeValue(forKey: liveTunnel.id)
             savePersonalTunnelsOnly()
             updateWarnings()
+            await syncSplitDNSState()
             log.info("Tunnel \(liveTunnel.name) disconnected")
             try? await notificationService.postDisconnected(tunnelName: liveTunnel.name)
         } catch {
@@ -636,13 +648,17 @@ final class TunnelManager: ObservableObject {
         }
         let savedURL = try configStorage.importConfig(from: url)
 
-        let name = savedURL.deletingPathExtension().lastPathComponent
+        // The saved file may carry a shortened interface-safe name; the user keeps the full one.
+        let name = ConfigStorageService.sanitize(
+            name: url.deletingPathExtension().lastPathComponent
+        )
         var tunnel = Tunnel(name: name, configPath: savedURL.path)
         tunnel.address = parsed.address
         tunnel.allowedIPs = parsed.allowedIPs
         tunnel.dns = parsed.dns
         tunnel.endpoint = parsed.endpoint
         tunnel.publicKey = parsed.peerPublicKey
+        tunnel.localPublicKey = parsed.privateKey.flatMap { WireGuardKey.publicKey(fromPrivateKey: $0) }
 
         tunnels.append(tunnel)
         savePersonalTunnelsOnly()
@@ -690,13 +706,14 @@ final class TunnelManager: ObservableObject {
         }
         let savedURL = try configStorage.saveConfig(name: name, content: configContent)
 
-        let storedName = savedURL.deletingPathExtension().lastPathComponent
+        let storedName = ConfigStorageService.sanitize(name: name)
         var tunnel = Tunnel(name: storedName, configPath: savedURL.path)
         tunnel.address = parsed.address
         tunnel.allowedIPs = parsed.allowedIPs
         tunnel.dns = parsed.dns
         tunnel.endpoint = parsed.endpoint
         tunnel.publicKey = parsed.peerPublicKey
+        tunnel.localPublicKey = parsed.privateKey.flatMap { WireGuardKey.publicKey(fromPrivateKey: $0) }
 
         tunnels.append(tunnel)
         savePersonalTunnelsOnly()
@@ -735,7 +752,7 @@ final class TunnelManager: ObservableObject {
             replacingExisting: isSameConfig
         )
         // Remove old file if renamed
-        if name != liveTunnel.name {
+        if savedURL.path != liveTunnel.configPath {
             try? configStorage.deleteConfig(at: URL(fileURLWithPath: liveTunnel.configPath))
         }
         tunnels[index].name = name
@@ -745,6 +762,7 @@ final class TunnelManager: ObservableObject {
         tunnels[index].dns = parsed.dns
         tunnels[index].endpoint = parsed.endpoint
         tunnels[index].publicKey = parsed.peerPublicKey
+        tunnels[index].localPublicKey = parsed.privateKey.flatMap { WireGuardKey.publicKey(fromPrivateKey: $0) }
         tunnels[index].updatedAt = Date()
         savePersonalTunnelsOnly()
         updateWarnings()
@@ -859,37 +877,21 @@ final class TunnelManager: ObservableObject {
         // agree with this tunnel's own configured port, it belongs to that other
         // tunnel, not this one.
         var updatedTunnels = tunnels
+        let matched = InterfaceMatcher.assign(
+            updatedTunnels.map {
+                InterfaceMatcher.Candidate(
+                    peerPublicKey: $0.publicKey,
+                    localPublicKey: $0.localPublicKey,
+                    endpoint: $0.endpoint,
+                    interfaceHint: $0.interfaceName
+                        ?? URL(fileURLWithPath: $0.configPath).deletingPathExtension().lastPathComponent
+                )
+            },
+            statuses: statusMonitor.statusMap
+        )
+
         for index in updatedTunnels.indices {
-            let iface = updatedTunnels[index].interfaceName
-                ?? URL(fileURLWithPath: updatedTunnels[index].configPath)
-                .deletingPathExtension().lastPathComponent
-            let peerKey = updatedTunnels[index].publicKey
-            let configuredPort = updatedTunnels[index].endpoint.flatMap { Self.parseEndpoint($0)?.port }
-            let byName = statusMonitor.statusMap[iface]
-
-            func isOurs(_ status: TunnelStatus) -> Bool {
-                guard let peerKey else { return false }
-                return status.peers.contains { peer in
-                    guard peer.publicKey == peerKey else { return false }
-                    guard let configuredPort,
-                          let peerPort = peer.endpoint.flatMap({ Self.parseEndpoint($0)?.port }) else {
-                        return true
-                    }
-                    return peerPort == configuredPort
-                }
-            }
-
-            let status: TunnelStatus?
-            if peerKey != nil {
-                let byNameIsOurs = byName.map(isOurs) ?? false
-                status = byNameIsOurs
-                    ? byName
-                    : statusMonitor.statusMap.values.first(where: isOurs)
-            } else {
-                // No known peer key to verify against (e.g. not parsed yet) — fall
-                // back to trusting the name match, as before.
-                status = byName
-            }
+            let status = matched[index]
 
             if let status = status {
                 updatedTunnels[index].isActive = true
@@ -935,6 +937,9 @@ final class TunnelManager: ObservableObject {
             tunnels = updatedTunnels
         }
         updateWarnings()
+        // A tunnel that dropped (or came back) outside our control must not leave its
+        // domain-scoped resolvers pointing at an unreachable DNS server.
+        await syncSplitDNSState()
     }
 
     func startPolling(interval: TimeInterval = 2.0) {
@@ -1236,6 +1241,60 @@ final class TunnelManager: ObservableObject {
         await handleNetworkChange()
     }
 
+    /// Admin-only: sets whether non-admin users may connect and/or disconnect this shared tunnel.
+    func updateManagedAccessPolicy(for tunnel: Tunnel, usersCanConnect: Bool, usersCanDisconnect: Bool) async throws {
+        guard let liveTunnel = tunnels.first(where: { $0.id == tunnel.id }), liveTunnel.scope == .managed else { return }
+        guard currentUserIsAdministrator else {
+            throw CommandError.managedTunnelFailed("Only an administrator can change access permissions for a shared tunnel.")
+        }
+        var policy = liveTunnel.managedPolicy ?? ManagedTunnelPolicy()
+        policy.usersCanConnect = usersCanConnect
+        policy.usersCanDisconnect = usersCanDisconnect
+        try await commandService.updateManagedTunnel(
+            id: liveTunnel.id,
+            name: liveTunnel.name,
+            contents: nil,
+            policy: policy,
+            autoConnectRule: liveTunnel.autoConnectRule
+        )
+        await loadManagedTunnels()
+        updateWarnings()
+        log.info("Access policy updated for shared tunnel \(liveTunnel.name): usersCanConnect=\(usersCanConnect) usersCanDisconnect=\(usersCanDisconnect)")
+    }
+
+    // MARK: - System settings
+
+    func loadSystemSettings() async {
+        guard let settings = try? await commandService.systemSettings() else { return }
+        systemSettings = settings
+    }
+
+    /// Admin-only: sets whether turning off "Launch at Login" requires administrator credentials on this Mac.
+    func updateRequireAdminToDisableLaunchAtLogin(_ enabled: Bool) async throws {
+        guard currentUserIsAdministrator else {
+            throw CommandError.managedTunnelFailed("Only an administrator can change this setting.")
+        }
+        var settings = systemSettings
+        settings.requireAdminToDisableLaunchAtLogin = enabled
+        try await commandService.updateSystemSettings(settings)
+        await loadSystemSettings()
+        log.info("System setting updated: requireAdminToDisableLaunchAtLogin=\(enabled)")
+    }
+
+    /// Returns true when turning off "Launch at Login" may proceed: either no administrator
+    /// requirement is set, or administrator credentials were just provided.
+    func authorizeDisablingLaunchAtLogin() async -> Bool {
+        await loadSystemSettings()
+        guard systemSettings.requireAdminToDisableLaunchAtLogin else { return true }
+        do {
+            try commandService.authorizeAdministrator()
+            return true
+        } catch {
+            log.info("Disabling Launch at Login was not authorized: \(error.localizedDescription)")
+            return false
+        }
+    }
+
     // MARK: - Kill switch
 
     func updateKillSwitch(for tunnel: Tunnel, enabled: Bool) {
@@ -1329,6 +1388,101 @@ final class TunnelManager: ObservableObject {
             errorMessage = "Kill switch could not be updated: \(error.localizedDescription)"
         }
         updateWarnings()
+    }
+
+    // MARK: - Split DNS
+
+    /// Lowercases and strips wildcard/leading-dot decoration; nil when not a valid domain.
+    nonisolated static func normalizedSplitDNSDomain(_ raw: String) -> String? {
+        var domain = raw.trimmingCharacters(in: .whitespaces).lowercased()
+        if domain.hasPrefix("*.") { domain.removeFirst(2) }
+        while domain.hasPrefix(".") { domain.removeFirst() }
+        while domain.hasSuffix(".") { domain.removeLast() }
+        let labels = domain.split(separator: ".", omittingEmptySubsequences: false)
+        guard !domain.isEmpty, domain.utf8.count <= 253,
+              labels.allSatisfy({ label in
+                  !label.isEmpty && label.utf8.count <= 63 && !label.hasPrefix("-") && !label.hasSuffix("-")
+                      && label.unicodeScalars.allSatisfy { CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789-").contains($0) }
+              }) else { return nil }
+        return domain
+    }
+
+    private static func normalizedUniqueDomains(_ domains: [String]) -> [String] {
+        var seen = Set<String>()
+        return domains.compactMap(normalizedSplitDNSDomain).filter { seen.insert($0).inserted }
+    }
+
+    /// True when changing to `domains` flips split DNS on or off for a connected
+    /// tunnel — wg-quick applied (or skipped) the system-wide DNS at connect time, so
+    /// only a reconnect makes that part take effect.
+    func splitDNSChangeNeedsReconnect(for tunnel: Tunnel, newDomains: [String]) -> Bool {
+        guard let live = tunnels.first(where: { $0.id == tunnel.id }), live.isActive else { return false }
+        return live.effectiveSplitDNSDomains.isEmpty != Self.normalizedUniqueDomains(newDomains).isEmpty
+    }
+
+    /// Sets the domains this personal tunnel's DNS servers answer for, re-syncing the
+    /// resolvers immediately and reconnecting when `reconnect` is set.
+    func updateSplitDNSDomains(for tunnel: Tunnel, domains: [String], reconnect: Bool = false) {
+        guard let index = tunnels.firstIndex(where: { $0.id == tunnel.id }),
+              tunnels[index].scope == .personal else { return }
+        tunnels[index].splitDNSDomains = Self.normalizedUniqueDomains(domains)
+        tunnels[index].updatedAt = Date()
+        savePersonalTunnelsOnly()
+        let updated = tunnels[index]
+        Task {
+            if reconnect && updated.isActive {
+                await disconnectTunnel(updated)
+                await connectTunnel(updated)
+            } else {
+                await syncSplitDNSState()
+            }
+        }
+    }
+
+    /// Admin-only: sets the split DNS domains of a shared tunnel (stored in its policy).
+    func updateManagedSplitDNSDomains(for tunnel: Tunnel, domains: [String], reconnect: Bool = false) async throws {
+        guard let liveTunnel = tunnels.first(where: { $0.id == tunnel.id }), liveTunnel.scope == .managed else { return }
+        guard currentUserIsAdministrator else {
+            throw CommandError.managedTunnelFailed("Only an administrator can change split DNS for a shared tunnel.")
+        }
+        var policy = liveTunnel.managedPolicy ?? ManagedTunnelPolicy()
+        policy.splitDNSDomains = Self.normalizedUniqueDomains(domains)
+        try await commandService.updateManagedTunnel(
+            id: liveTunnel.id,
+            name: liveTunnel.name,
+            contents: nil,
+            policy: policy,
+            autoConnectRule: liveTunnel.autoConnectRule
+        )
+        await loadManagedTunnels()
+        updateWarnings()
+        log.info("Split DNS updated for shared tunnel \(liveTunnel.name)")
+        if reconnect, let refreshed = tunnels.first(where: { $0.id == liveTunnel.id }), refreshed.isActive {
+            await disconnectTunnel(refreshed)
+            await connectTunnel(refreshed)
+        } else {
+            await syncSplitDNSState()
+        }
+    }
+
+    /// Pushes the full desired resolver set — every active personal tunnel with split
+    /// DNS domains and at least one DNS server — to the helper. Idempotent, and the
+    /// helper removes any resolver it owns that is no longer listed.
+    private func syncSplitDNSState() async {
+        let entries = tunnels.compactMap { tunnel -> SplitDNSEntry? in
+            guard tunnel.isActive, !tunnel.effectiveSplitDNSDomains.isEmpty else { return nil }
+            let servers = tunnel.dns.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            guard !servers.isEmpty else { return nil }
+            return SplitDNSEntry(ownerId: tunnel.id.uuidString, domains: tunnel.effectiveSplitDNSDomains, servers: servers)
+        }
+        guard entries != lastSyncedSplitDNS else { return }
+        lastSyncedSplitDNS = entries  // also on failure: retry on the next state change, not every poll
+        do {
+            try await commandService.syncSplitDNS(entries: entries)
+        } catch {
+            log.error("Failed to sync split DNS: \(error.localizedDescription)")
+            if !entries.isEmpty { errorMessage = "Split DNS could not be applied: \(error.localizedDescription)" }
+        }
     }
 
     // MARK: - Split tunnel exclusions
@@ -1559,16 +1713,7 @@ final class TunnelManager: ObservableObject {
 
     /// Splits a `wg show`-style endpoint string ("host:port" or "[host]:port" for IPv6) into its parts.
     private static func parseEndpoint(_ endpoint: String) -> (host: String, port: Int)? {
-        if endpoint.hasPrefix("["), let closeBracket = endpoint.firstIndex(of: "]") {
-            let host = String(endpoint[endpoint.index(after: endpoint.startIndex)..<closeBracket])
-            let rest = endpoint[endpoint.index(after: closeBracket)...]
-            guard rest.hasPrefix(":"), let port = Int(rest.dropFirst()) else { return nil }
-            return (host, port)
-        }
-        guard let lastColon = endpoint.lastIndex(of: ":") else { return nil }
-        let host = String(endpoint[..<lastColon])
-        guard let port = Int(endpoint[endpoint.index(after: lastColon)...]) else { return nil }
-        return (host, port)
+        InterfaceMatcher.parseEndpoint(endpoint)
     }
 
     /// Resolves `host` to a literal IP address — passes it through unchanged if it

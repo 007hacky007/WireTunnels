@@ -2,6 +2,14 @@ import Foundation
 import Security
 import ServiceManagement
 
+/// DNS servers that should answer only for `domains` (macOS /etc/resolver split DNS),
+/// owned by one tunnel. Shared with the helper's identically-shaped type.
+struct SplitDNSEntry: Codable, Equatable {
+    let ownerId: String
+    let domains: [String]
+    let servers: [String]
+}
+
 struct KillSwitchEntry: Codable {
     let interfaceName: String
     let endpointHost: String
@@ -21,8 +29,8 @@ struct RouteEntry: Codable, Equatable {
 @MainActor
 final class WireGuardCommandService {
     nonisolated static let helperMachServiceName = "com.fmdigitech.WireTunnels.helper"
-    nonisolated static let expectedHelperVersion = "1.0.5"
-    nonisolated static let expectedHelperProtocolRevision = "route-sync-v1"
+    nonisolated static let expectedHelperVersion = "1.0.6"
+    nonisolated static let expectedHelperProtocolRevision = "split-dns-v1"
     private static let helperCheckTimeoutNanoseconds: UInt64 = 3_000_000_000
     private static let keyGenerationTimeoutNanoseconds: UInt64 = 10_000_000_000
     private static let operationTimeoutNanoseconds: UInt64 = 30_000_000_000
@@ -385,6 +393,19 @@ final class WireGuardCommandService {
         }
     }
 
+    /// Replaces the complete set of WireTunnels-managed split-DNS resolvers. Pass an
+    /// empty array to remove them all.
+    func syncSplitDNS(entries: [SplitDNSEntry]) async throws {
+        let data = try JSONEncoder().encode(entries)
+        return try await performHelperOperation(timeoutDescription: "Updating split DNS") { helper, complete in
+            helper.syncSplitDNS(entries: data) { success, errorMessage in
+                complete(success
+                    ? .success(())
+                    : .failure(CommandError.splitDNSFailed(errorMessage ?? "Unknown")))
+            }
+        }
+    }
+
     /// `ownerId` identifies whose routes these are — a tunnel's own UUID for split-
     /// tunnel exclusions, or a `HopChain`'s UUID for the chain's host route. Pass an
     /// empty `entries` array to flush everything previously installed for that owner.
@@ -525,6 +546,36 @@ final class WireGuardCommandService {
         }
     }
 
+    func systemSettings() async throws -> SystemSettings {
+        let data: Data = try await performHelperOperation(timeoutDescription: "Reading system settings") { helper, complete in
+            helper.getSystemSettings { data, errorMessage in
+                if let data {
+                    complete(.success(data))
+                } else {
+                    complete(.failure(CommandError.managedTunnelFailed(errorMessage ?? "Unknown")))
+                }
+            }
+        }
+        return try JSONDecoder().decode(SystemSettings.self, from: data)
+    }
+
+    func updateSystemSettings(_ settings: SystemSettings) async throws {
+        let settingsData = try JSONEncoder().encode(settings)
+        let authorization = try adminAuthorizationToken()
+        try await performHelperOperation(timeoutDescription: "Updating system settings") { helper, complete in
+            helper.setSystemSettings(settings: settingsData, authorization: authorization) { success, errorMessage in
+                complete(success
+                    ? .success(())
+                    : .failure(CommandError.managedTunnelFailed(errorMessage ?? "Unknown")))
+            }
+        }
+    }
+
+    /// Prompts for administrator credentials (a standard user can enter an admin's) without performing any privileged operation.
+    func authorizeAdministrator() throws {
+        _ = try adminAuthorizationToken()
+    }
+
     func deleteManagedTunnel(id: UUID) async throws {
         let authorization = try adminAuthorizationToken()
         try await performHelperOperation(timeoutDescription: "Deleting managed tunnel") { helper, complete in
@@ -656,6 +707,7 @@ enum CommandError: LocalizedError {
     case managedTunnelFailed(String)
     case killSwitchFailed(String)
     case routeSyncFailed(String)
+    case splitDNSFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -680,6 +732,7 @@ enum CommandError: LocalizedError {
         case .managedTunnelFailed(let msg): return "Managed tunnel operation failed: \(msg)"
         case .killSwitchFailed(let msg): return "Kill switch update failed: \(msg)"
         case .routeSyncFailed(let msg): return "Route update failed: \(msg)"
+        case .splitDNSFailed(let msg): return "Split DNS update failed: \(msg)"
         }
     }
 }

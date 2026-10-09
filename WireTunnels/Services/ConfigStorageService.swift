@@ -13,7 +13,7 @@ final class ConfigStorageService {
     func importConfig(from sourceURL: URL) throws -> URL {
         let rawName = sourceURL.deletingPathExtension().lastPathComponent
         let sanitizedName = ConfigStorageService.sanitize(name: rawName)
-        let destURL = try destinationURL(for: sanitizedName)
+        let destURL = try destinationURL(for: ConfigStorageService.fileBaseName(for: sanitizedName))
         guard !fm.fileExists(atPath: destURL.path) else {
             throw ConfigStorageError.alreadyExists(sanitizedName)
         }
@@ -37,13 +37,31 @@ final class ConfigStorageService {
         return String(traversalSafe.prefix(50))
     }
 
-    /// Save config content as a new file
+    /// wg-quick derives the interface name from the config filename, and macOS
+    /// limits interface names to 15 bytes. The display name (up to 50 characters)
+    /// is kept on the Tunnel; the file gets this short, deterministic name instead.
+    /// Names that already fit are used unchanged.
+    static let maxInterfaceNameLength = 15
+
+    static func fileBaseName(for displayName: String) -> String {
+        let base = displayName.hasSuffix(".conf") ? String(displayName.dropLast(".conf".count)) : displayName
+        guard base.utf8.count > maxInterfaceNameLength else { return base }
+        // FNV-1a keeps the suffix stable across launches (Hasher is randomly seeded).
+        var hash: UInt32 = 2166136261
+        for byte in base.utf8 {
+            hash = (hash ^ UInt32(byte)) &* 16777619
+        }
+        let suffix = String(format: "%06x", hash & 0xFFFFFF)
+        return "\(base.prefix(maxInterfaceNameLength - suffix.count - 1))-\(suffix)"
+    }
+
+    /// Save config content as a new file. `name` is the display name.
     func saveConfig(
         name: String,
         content: String,
         replacingExisting: Bool = false
     ) throws -> URL {
-        let destURL = try destinationURL(for: name)
+        let destURL = try destinationURL(for: ConfigStorageService.fileBaseName(for: name))
         if fm.fileExists(atPath: destURL.path), !replacingExisting {
             throw ConfigStorageError.alreadyExists(name)
         }
@@ -78,7 +96,7 @@ final class ConfigStorageService {
             ? String(name.dropLast(".conf".count))
             : name
         guard !baseName.isEmpty,
-              baseName.utf8.count <= 15,
+              baseName.utf8.count <= ConfigStorageService.maxInterfaceNameLength,
               !baseName.contains(".."),
               baseName.unicodeScalars.allSatisfy({
                 CharacterSet(
@@ -102,7 +120,7 @@ enum ConfigStorageError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidName:
-            return "Tunnel names must use 1-15 ASCII letters, digits, or _ = + . -"
+            return "Tunnel names must use 1-50 ASCII letters, digits, or _ = + . -"
         case .alreadyExists(let name):
             return "A tunnel named \"\(name)\" already exists"
         }

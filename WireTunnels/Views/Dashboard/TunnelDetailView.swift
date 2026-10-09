@@ -67,6 +67,7 @@ struct TunnelDetailView: View {
     @State private var speedTestURLText: String = ""
     @State private var isSharingTunnel = false
     @State private var isProcessing = false
+    @State private var isSavingAccessPolicy = false
     @State private var isLoadingConnectedUsers = false
     @State private var connectedUsers: [ManagedTunnelUserSession] = []
     @State private var errorMessage: String? = nil
@@ -94,6 +95,11 @@ struct TunnelDetailView: View {
     // Split tunnel exclusions — mirrors live.excludedRoutes, saved immediately on change.
     @State private var excludedRoutes: [String] = []
     @State private var newExcludedRoute: String = ""
+    // Split DNS domains — mirrors live.splitDNSDomains, saved immediately on change.
+    @State private var splitDNSDomains: [String] = []
+    @State private var newSplitDNSDomain: String = ""
+    @State private var pendingSplitDNSDomains: [String]?
+    @State private var showSplitDNSReconnectPrompt = false
 
     // Always read live data from TunnelManager so stats update in real-time
     private var live: Tunnel {
@@ -220,6 +226,8 @@ struct TunnelDetailView: View {
                 if isManaged && tunnelManager.currentUserIsAdministrator {
                     Divider()
                     connectedUsersSection
+                    Divider()
+                    accessControlSection
                 }
 
                 // Traffic charts — only when active and samples exist
@@ -245,6 +253,11 @@ struct TunnelDetailView: View {
                     // Split Tunnel Exclusions
                     splitTunnelSection
                 }
+
+                Divider()
+
+                // Split DNS (personal tunnels, or shared ones with admin-only editing)
+                splitDNSSection
 
                 Divider()
 
@@ -277,11 +290,13 @@ struct TunnelDetailView: View {
             killSwitchEnabled = live.isKillSwitchEnabled
             speedTestURLText = live.speedTestURL ?? ""
             excludedRoutes = live.excludedRoutes
+            splitDNSDomains = live.effectiveSplitDNSDomains
         }
         .onChange(of: live.autoConnectRule) { _, _ in loadRule() }
         .onChange(of: live.isKillSwitchEnabled) { _, newValue in killSwitchEnabled = newValue }
         .onChange(of: live.speedTestURL) { _, newValue in speedTestURLText = newValue ?? "" }
         .onChange(of: live.excludedRoutes) { _, newValue in excludedRoutes = newValue }
+        .onChange(of: live.effectiveSplitDNSDomains) { _, newValue in splitDNSDomains = newValue }
         .task {
             knownNetworks = await Task.detached { NetworkMonitorService.knownWiFiNetworkNames() }.value
         }
@@ -438,6 +453,52 @@ struct TunnelDetailView: View {
             }
             .buttonStyle(.bordered)
             .disabled(isLoadingConnectedUsers)
+        }
+    }
+
+    private var accessControlSection: some View {
+        let policy = live.managedPolicy ?? ManagedTunnelPolicy()
+        return DetailSection(title: "User Access") {
+            Text("Controls what other users of this Mac can do with this shared tunnel from their own account. Administrators are never restricted.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Toggle(isOn: Binding(
+                get: { policy.usersCanConnect },
+                set: { saveAccessPolicy(usersCanConnect: $0, usersCanDisconnect: policy.usersCanDisconnect) }
+            )) {
+                Label("Allow users to connect", systemImage: "power")
+                    .font(.subheadline.weight(.medium))
+            }
+            .toggleStyle(.switch)
+            .disabled(isSavingAccessPolicy)
+
+            Toggle(isOn: Binding(
+                get: { policy.usersCanDisconnect },
+                set: { saveAccessPolicy(usersCanConnect: policy.usersCanConnect, usersCanDisconnect: $0) }
+            )) {
+                Label("Allow users to disconnect", systemImage: "poweroff")
+                    .font(.subheadline.weight(.medium))
+            }
+            .toggleStyle(.switch)
+            .disabled(isSavingAccessPolicy)
+        }
+    }
+
+    private func saveAccessPolicy(usersCanConnect: Bool, usersCanDisconnect: Bool) {
+        guard tunnelManager.currentUserIsAdministrator, !isSavingAccessPolicy else { return }
+        isSavingAccessPolicy = true
+        Task {
+            do {
+                try await tunnelManager.updateManagedAccessPolicy(
+                    for: live,
+                    usersCanConnect: usersCanConnect,
+                    usersCanDisconnect: usersCanDisconnect
+                )
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+            isSavingAccessPolicy = false
         }
     }
 
@@ -674,6 +735,108 @@ struct TunnelDetailView: View {
 
     private func saveExcludedRoutes() {
         tunnelManager.updateExcludedRoutes(for: live, routes: excludedRoutes)
+    }
+
+    // MARK: Split DNS
+
+    private var splitDNSSection: some View {
+        DetailSection(title: "Split DNS") {
+            Text("Use this tunnel's DNS servers only for these domains (e.g. lan, corp.example); every other name keeps using your normal DNS. Adding the first domain or removing the last one reconnects the tunnel.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if live.dns.isEmpty {
+                Text("This tunnel has no DNS server configured, so there is nothing to route.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+
+            if !splitDNSDomains.isEmpty {
+                VStack(spacing: 4) {
+                    ForEach(splitDNSDomains, id: \.self) { domain in
+                        HStack {
+                            Image(systemName: "network")
+                                .foregroundStyle(.secondary)
+                                .font(.caption)
+                            Text(domain)
+                                .font(.system(.subheadline, design: .monospaced))
+                            Spacer()
+                            if canEditOnDemand {
+                                Button {
+                                    saveSplitDNSDomains(splitDNSDomains.filter { $0 != domain })
+                                } label: {
+                                    Image(systemName: "minus.circle.fill")
+                                        .foregroundStyle(.red)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+                    }
+                }
+            }
+
+            if canEditOnDemand {
+            HStack {
+                TextField("Domain, e.g. lan or corp.example", text: $newSplitDNSDomain)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.body, design: .monospaced))
+                    .disableAutocorrection(true)
+                    .onSubmit(addSplitDNSDomain)
+                Button("Add", action: addSplitDNSDomain)
+                    .buttonStyle(.bordered)
+                    .disabled(TunnelManager.normalizedSplitDNSDomain(newSplitDNSDomain) == nil)
+            }
+            }
+        }
+        .confirmationDialog(
+            "Reconnect \(live.name) to apply this change?",
+            isPresented: $showSplitDNSReconnectPrompt,
+            titleVisibility: .visible
+        ) {
+            Button("Reconnect Now") { applySplitDNS(pendingSplitDNSDomains ?? splitDNSDomains, reconnect: true) }
+            Button("Apply Later") { applySplitDNS(pendingSplitDNSDomains ?? splitDNSDomains, reconnect: false) }
+            Button("Cancel", role: .cancel) { pendingSplitDNSDomains = nil }
+        } message: {
+            Text("This briefly interrupts the connection. Without a reconnect the system-wide DNS stays as it was until the next connect.")
+        }
+    }
+
+    private func addSplitDNSDomain() {
+        guard let domain = TunnelManager.normalizedSplitDNSDomain(newSplitDNSDomain) else { return }
+        newSplitDNSDomain = ""
+        guard !splitDNSDomains.contains(domain) else { return }
+        saveSplitDNSDomains(splitDNSDomains + [domain])
+    }
+
+    private func saveSplitDNSDomains(_ domains: [String]) {
+        guard canEditOnDemand else { return }
+        if tunnelManager.splitDNSChangeNeedsReconnect(for: live, newDomains: domains) {
+            pendingSplitDNSDomains = domains
+            splitDNSDomains = domains
+            showSplitDNSReconnectPrompt = true
+        } else {
+            applySplitDNS(domains, reconnect: false)
+        }
+    }
+
+    private func applySplitDNS(_ domains: [String], reconnect: Bool) {
+        pendingSplitDNSDomains = nil
+        splitDNSDomains = domains
+        if isManaged {
+            Task {
+                do {
+                    try await tunnelManager.updateManagedSplitDNSDomains(for: live, domains: domains, reconnect: reconnect)
+                } catch {
+                    errorMessage = error.localizedDescription
+                    splitDNSDomains = live.effectiveSplitDNSDomains
+                }
+            }
+        } else {
+            tunnelManager.updateSplitDNSDomains(for: live, domains: domains, reconnect: reconnect)
+        }
     }
 
     private var actionsSection: some View {

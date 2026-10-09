@@ -50,7 +50,7 @@ final class StatusMonitorService: ObservableObject {
             if fields.count == 5 {
                 // Interface line
                 let iface = fields[0]
-                let pubKey = fields[1]
+                let pubKey = fields[2]  // fields[1] is the private key
                 let port = Int(fields[3]) ?? 0
                 interfaceMap[iface] = (pubKey: pubKey, port: port, peers: [])
             } else if fields.count == 9 {

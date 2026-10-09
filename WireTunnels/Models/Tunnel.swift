@@ -9,17 +9,20 @@ struct ManagedTunnelPolicy: Codable, Equatable, Hashable {
     var usersCanConnect: Bool
     var usersCanDisconnect: Bool
     var killSwitchEnabled: Bool
+    var splitDNSDomains: [String]
 
     private enum CodingKeys: String, CodingKey {
         case usersCanConnect
         case usersCanDisconnect
         case killSwitchEnabled
+        case splitDNSDomains
     }
 
-    init(usersCanConnect: Bool = true, usersCanDisconnect: Bool = true, killSwitchEnabled: Bool = false) {
+    init(usersCanConnect: Bool = true, usersCanDisconnect: Bool = true, killSwitchEnabled: Bool = false, splitDNSDomains: [String] = []) {
         self.usersCanConnect = usersCanConnect
         self.usersCanDisconnect = usersCanDisconnect
         self.killSwitchEnabled = killSwitchEnabled
+        self.splitDNSDomains = splitDNSDomains
     }
 
     init(from decoder: Decoder) throws {
@@ -27,6 +30,21 @@ struct ManagedTunnelPolicy: Codable, Equatable, Hashable {
         usersCanConnect = try container.decodeIfPresent(Bool.self, forKey: .usersCanConnect) ?? true
         usersCanDisconnect = try container.decodeIfPresent(Bool.self, forKey: .usersCanDisconnect) ?? true
         killSwitchEnabled = try container.decodeIfPresent(Bool.self, forKey: .killSwitchEnabled) ?? false
+        splitDNSDomains = try container.decodeIfPresent([String].self, forKey: .splitDNSDomains) ?? []
+    }
+}
+
+/// Device-wide settings set by an administrator, stored root-owned by the helper.
+struct SystemSettings: Codable, Equatable {
+    var requireAdminToDisableLaunchAtLogin: Bool = false
+
+    init(requireAdminToDisableLaunchAtLogin: Bool = false) {
+        self.requireAdminToDisableLaunchAtLogin = requireAdminToDisableLaunchAtLogin
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        requireAdminToDisableLaunchAtLogin = try container.decodeIfPresent(Bool.self, forKey: .requireAdminToDisableLaunchAtLogin) ?? false
     }
 }
 
@@ -53,8 +71,10 @@ struct Tunnel: Identifiable, Codable, Equatable, Hashable {
     var allowedIPs: [String]
     var excludedRoutes: [String]  // CIDR ranges to bypass this tunnel at runtime, routed via the pre-VPN gateway
     var dns: [String]
+    var splitDNSDomains: [String]  // when set, this tunnel's DNS answers only for these domains (split DNS)
     var endpoint: String?
     var publicKey: String?
+    var localPublicKey: String?  // public key derived from this client's own [Interface] PrivateKey
     var speedTestURL: String?   // user-supplied HTTPS URL for the optional throughput probe — never a built-in default
     var lastHandshake: Date?
     var rxBytes: Int64
@@ -80,8 +100,10 @@ struct Tunnel: Identifiable, Codable, Equatable, Hashable {
         case allowedIPs
         case excludedRoutes
         case dns
+        case splitDNSDomains
         case endpoint
         case publicKey
+        case localPublicKey
         case speedTestURL
         case lastHandshake
         case rxBytes
@@ -107,8 +129,10 @@ struct Tunnel: Identifiable, Codable, Equatable, Hashable {
         self.allowedIPs = []
         self.excludedRoutes = []
         self.dns = []
+        self.splitDNSDomains = []
         self.endpoint = nil
         self.publicKey = nil
+        self.localPublicKey = nil
         self.speedTestURL = nil
         self.lastHandshake = nil
         self.rxBytes = 0
@@ -138,8 +162,10 @@ struct Tunnel: Identifiable, Codable, Equatable, Hashable {
         allowedIPs = try container.decode([String].self, forKey: .allowedIPs)
         excludedRoutes = try container.decodeIfPresent([String].self, forKey: .excludedRoutes) ?? []
         dns = try container.decode([String].self, forKey: .dns)
+        splitDNSDomains = try container.decodeIfPresent([String].self, forKey: .splitDNSDomains) ?? []
         endpoint = try container.decodeIfPresent(String.self, forKey: .endpoint)
         publicKey = try container.decodeIfPresent(String.self, forKey: .publicKey)
+        localPublicKey = try container.decodeIfPresent(String.self, forKey: .localPublicKey)
         speedTestURL = try container.decodeIfPresent(String.self, forKey: .speedTestURL)
         lastHandshake = try container.decodeIfPresent(Date.self, forKey: .lastHandshake)
         rxBytes = try container.decode(Int64.self, forKey: .rxBytes)
@@ -154,6 +180,12 @@ struct Tunnel: Identifiable, Codable, Equatable, Hashable {
     /// Whether the kill switch is armed for this tunnel, regardless of scope —
     /// personal tunnels use their own flag, managed tunnels defer to the
     /// admin-controlled policy pushed from the shared helper store.
+    /// Domains routed to this tunnel's DNS servers: the admin-set policy for shared
+    /// tunnels, the tunnel's own list otherwise.
+    var effectiveSplitDNSDomains: [String] {
+        scope == .managed ? (managedPolicy?.splitDNSDomains ?? []) : splitDNSDomains
+    }
+
     var isKillSwitchEnabled: Bool {
         scope == .managed ? (managedPolicy?.killSwitchEnabled ?? false) : killSwitchEnabled
     }

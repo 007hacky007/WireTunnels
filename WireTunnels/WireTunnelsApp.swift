@@ -1,8 +1,12 @@
 import SwiftUI
 import AppKit
 
-// Opens the dashboard window on every app launch, overriding SwiftUI's
-// saved-close-state restoration (Window scenes remember if the user closed them).
+extension Notification.Name {
+    static let openDashboardRequested = Notification.Name("WireTunnels.openDashboardRequested")
+}
+
+// Opens the dashboard window on every app launch (unless "Start in background" is on),
+// overriding SwiftUI's saved-close-state restoration (Window scenes remember if the user closed them).
 private class AppDelegate: NSObject, NSApplicationDelegate {
     var tunnelManager: TunnelManager?
 
@@ -13,9 +17,12 @@ private class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
         // Clicking the Dock icon when all windows are closed re-opens the dashboard.
         if !hasVisibleWindows {
-            NSApp.windows
-                .first { $0.title == "WireTunnels" }?
-                .makeKeyAndOrderFront(nil)
+            if let window = NSApp.windows.first(where: { $0.title == "WireTunnels" }) {
+                window.makeKeyAndOrderFront(nil)
+            } else {
+                // Started in background: the dashboard window was never created.
+                NotificationCenter.default.post(name: .openDashboardRequested, object: nil)
+            }
         }
         return true
     }
@@ -83,6 +90,7 @@ struct WireTunnelsApp: App {
 
 private struct MenuBarIconView: View {
     @Environment(\.openWindow) private var openWindow
+    @AppStorage("launchInBackground") private var launchInBackground = false
     let hasActive: Bool
     let hasWarnings: Bool
     let hasError: Bool
@@ -92,6 +100,10 @@ private struct MenuBarIconView: View {
             .symbolRenderingMode(.palette)
             .foregroundStyle(iconColor, .primary)
             .task {
+                guard !launchInBackground else { return }
+                openWindow(id: "dashboard")
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .openDashboardRequested)) { _ in
                 openWindow(id: "dashboard")
             }
     }

@@ -1,4 +1,17 @@
+import CryptoKit
 import Foundation
+
+enum WireGuardKey {
+    /// Derives the base64 WireGuard public key from a base64 private key (X25519).
+    static func publicKey(fromPrivateKey privateKey: String) -> String? {
+        guard let raw = Data(base64Encoded: privateKey.trimmingCharacters(in: .whitespacesAndNewlines)),
+              raw.count == 32,
+              let key = try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: raw) else {
+            return nil
+        }
+        return key.publicKey.rawRepresentation.base64EncodedString()
+    }
+}
 
 struct ParsedConfig {
     // Interface section

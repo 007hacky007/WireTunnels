@@ -12,6 +12,7 @@ struct SettingsView: View {
     @AppStorage("showNotifications") var showNotifications = false
     @AppStorage("showRawOutput")     var showRawOutput    = false
     @AppStorage("hideDockIcon")      var hideDockIcon     = false
+    @AppStorage("launchInBackground") var launchInBackground = false
 
     @State private var showingResetConfirm = false
     @State private var isRedetecting = false
@@ -174,15 +175,58 @@ struct SettingsView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Launch at Login")
                                 .font(.body)
-                            Text("Start WireGuard Tunnels automatically when you log in.")
+                            Text(tunnelManager.systemSettings.requireAdminToDisableLaunchAtLogin
+                                 ? "Start WireGuard Tunnels automatically when you log in. Turning this off requires administrator credentials."
+                                 : "Start WireGuard Tunnels automatically when you log in.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
                     }
                     .toggleStyle(.switch)
                     .onChange(of: launchAtLogin) { _, newValue in
-                        applyLaunchAtLogin(newValue)
+                        guard !newValue else {
+                            applyLaunchAtLogin(true)
+                            return
+                        }
+                        Task {
+                            if await tunnelManager.authorizeDisablingLaunchAtLogin() {
+                                applyLaunchAtLogin(false)
+                            } else {
+                                launchAtLogin = true
+                            }
+                        }
                     }
+
+                    Divider()
+
+                    if tunnelManager.currentUserIsAdministrator {
+                        Toggle(isOn: Binding(
+                            get: { tunnelManager.systemSettings.requireAdminToDisableLaunchAtLogin },
+                            set: { setRequireAdminToDisableLaunchAtLogin($0) }
+                        )) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Require Administrator to Turn Off Launch at Login")
+                                    .font(.body)
+                                Text("Applies to every user of this Mac. Users can still change it in System Settings > General > Login Items.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .toggleStyle(.switch)
+
+                        Divider()
+                    }
+
+                    Toggle(isOn: $launchInBackground) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Start in Background")
+                                .font(.body)
+                            Text("Don't open the dashboard window when WireTunnels starts. Open it from the menu bar icon or the Dock.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .toggleStyle(.switch)
 
                     Divider()
 
@@ -328,6 +372,7 @@ struct SettingsView: View {
             Text("All tunnels and preferences will be permanently deleted.")
         }
         .task {
+            await tunnelManager.loadSystemSettings()
             guard showNotifications else { return }
             let granted = await notificationService.setNotificationsEnabled(true)
             if !granted {
@@ -373,14 +418,26 @@ struct SettingsView: View {
         }
     }
 
+    private func setRequireAdminToDisableLaunchAtLogin(_ enabled: Bool) {
+        Task {
+            do {
+                try await tunnelManager.updateRequireAdminToDisableLaunchAtLogin(enabled)
+            } catch {
+                tunnelManager.errorMessage = error.localizedDescription
+            }
+        }
+    }
+
     private func resetAppData() {
         Task {
+            if launchAtLogin, !(await tunnelManager.authorizeDisablingLaunchAtLogin()) { return }
             try? await SMAppService.mainApp.unregister()
             guard await tunnelManager.resetUserData() else { return }
             launchAtLogin = false
             showNotifications = false
             showRawOutput = false
             hideDockIcon = false
+            launchInBackground = false
             NSApp.setActivationPolicy(.regular)
         }
     }

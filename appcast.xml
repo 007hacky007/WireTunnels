@@ -8,6 +8,37 @@
         <description>WireTunnels update feed</description>
         <language>en</language>
         <item>
+            <title>Version 1.0.6</title>
+            <pubDate>Fri, 09 Oct 2026 00:00:00 +0000</pubDate>
+            <sparkle:version>7</sparkle:version>
+            <sparkle:shortVersionString>1.0.6</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[
+                <ul>
+                    <li>Split DNS: send only chosen domains (for example <code>lan</code> or <code>corp.example</code>) to a tunnel's DNS servers while everything else keeps using your normal DNS. Set it per tunnel, including shared tunnels (administrators)</li>
+                    <li>Tunnel names up to 50 characters now work everywhere: importing, creating and editing a profile no longer fails on names longer than 15 characters, and the name you chose is the one you see</li>
+                    <li>Fixed two client profiles for the same server (same server key and port) both showing as connected when only one was actually running, and the "Invalid or missing tunnel configuration" error when turning the other one off</li>
+                    <li>Shared tunnels: administrators can now allow or block other users from connecting and/or disconnecting a shared tunnel, from the tunnel's own detail page</li>
+                    <li>New "Start in Background" setting: skip opening the dashboard window on launch (pairs well with "Hide Dock Icon" for a menu-bar-only app)</li>
+                    <li>New administrator option to require an admin password to turn off "Launch at Login"</li>
+                </ul>
+                <p><strong>Notes</strong></p>
+                <ul>
+                    <li>Existing installs will be prompted to update the privileged helper on first launch after upgrading</li>
+                    <li>If you turn Split DNS on or off for a connected tunnel, you'll be asked whether to reconnect it, since that is when the system-wide DNS is decided</li>
+                    <li>WireTunnels only manages the resolver files it created for Split DNS; existing resolver configuration for the same domain is left untouched</li>
+                    <li>The administrator Launch-at-Login option only governs WireTunnels' own Settings — it doesn't prevent disabling the login item from System Settings directly</li>
+                </ul>
+            ]]></description>
+            <enclosure
+                url="https://github.com/FMDigitech/WireTunnels/releases/download/v1.0.6/WireTunnels-1.0.6.dmg"
+                sparkle:edSignature="qDQtCwOy2MJjKl+RHVs2pr5ja83l6B5WKysL691A1tc4xjmP9D/kmu7zcTKP3abvG9ZWUuheL3ev8MWov8DqDw=="
+                length="14281704"
+                type="application/octet-stream"
+            />
+        </item>
+
+        <item>
             <title>Version 1.0.5</title>
             <pubDate>Mon, 31 Aug 2026 00:00:00 +0000</pubDate>
             <sparkle:version>6</sparkle:version>
