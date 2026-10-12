@@ -6,6 +6,10 @@ private let helperVersionNumber = "1.0.7"
 private let helperProtocolRevisionValue = "inventory-routing-v2-helper-tools"
 private let applicationIdentifier = "com.fmdigitech.WireTunnels"
 private let applicationTeamIdentifier = "48W4Z4X56T"
+private let clientCodeRequirement = """
+anchor apple generic and identifier "\(applicationIdentifier)" and \
+certificate leaf[subject.OU] = "\(applicationTeamIdentifier)"
+"""
 private let systemRoot = URL(fileURLWithPath: "/Library/Application Support/WireTunnels")
 private let systemBinDir = systemRoot.appendingPathComponent("bin", isDirectory: true)
 private let runtimeConfigDir = systemRoot.appendingPathComponent("runtime", isDirectory: true)
@@ -376,86 +380,16 @@ private enum ConfigSafety {
 private struct ValidatedClient {
     let user: ClientUser
 
-    init?(connection: NSXPCConnection) {
-        guard let user = Self.user(for: connection.processIdentifier) else {
-            return nil
-        }
-
-        let attributes = [
-            kSecGuestAttributePid as String: NSNumber(value: connection.processIdentifier)
-        ] as CFDictionary
-
-        var guestCode: SecCode?
-        guard SecCodeCopyGuestWithAttributes(nil, attributes, [], &guestCode) == errSecSuccess,
-              let guestCode else {
-            return nil
-        }
-
-        let requirementText = """
-        anchor apple generic and identifier "\(applicationIdentifier)" and \
-        certificate leaf[subject.OU] = "\(applicationTeamIdentifier)"
-        """
-        var requirement: SecRequirement?
-        guard SecRequirementCreateWithString(
-            requirementText as CFString,
-            [],
-            &requirement
-        ) == errSecSuccess,
-        let requirement,
-        SecCodeCheckValidity(guestCode, [], requirement) == errSecSuccess else {
-            return nil
-        }
-
-        var staticCode: SecStaticCode?
-        guard SecCodeCopyStaticCode(guestCode, [], &staticCode) == errSecSuccess,
-              let staticCode,
-              SecStaticCodeCheckValidity(
-                staticCode,
-                SecCSFlags(rawValue: kSecCSCheckAllArchitectures),
-                requirement
-              ) == errSecSuccess else {
-            return nil
-        }
-
-        var signingInformation: CFDictionary?
-        guard SecCodeCopySigningInformation(
-            staticCode,
-            SecCSFlags(rawValue: kSecCSSigningInformation),
-            &signingInformation
-        ) == errSecSuccess,
-        let information = signingInformation as? [String: Any],
-        information[kSecCodeInfoIdentifier as String] as? String == applicationIdentifier,
-        information[kSecCodeInfoTeamIdentifier as String] as? String == applicationTeamIdentifier,
-        let executableURL = information[kSecCodeInfoMainExecutable as String] as? URL else {
-            return nil
-        }
-
-        let candidateBundle = executableURL
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .standardizedFileURL
-        guard candidateBundle.pathExtension == "app",
-              candidateBundle.appendingPathComponent("Contents/Resources/wireguard").path
-                .hasPrefix(candidateBundle.path + "/") else {
-            return nil
-        }
-        self.user = user
+    init(connection: NSXPCConnection) {
+        // The uid comes from the connection's audit token, not a PID lookup: a PID can be
+        // reused by another process between the message being sent and this check.
+        user = Self.user(for: connection.effectiveUserIdentifier)
     }
 
-    private static func user(for pid: pid_t) -> ClientUser? {
-        var info = proc_bsdinfo()
-        let size = proc_pidinfo(
-            pid,
-            PROC_PIDTBSDINFO,
-            0,
-            &info,
-            Int32(MemoryLayout<proc_bsdinfo>.size)
-        )
-        guard size == MemoryLayout<proc_bsdinfo>.size else { return nil }
-        let uid = Int(info.pbi_uid)
+    private static func user(for effectiveUID: uid_t) -> ClientUser {
+        let uid = Int(effectiveUID)
         let username: String
-        if let passwd = getpwuid(uid_t(uid)) {
+        if let passwd = getpwuid(effectiveUID) {
             username = String(cString: passwd.pointee.pw_name)
         } else {
             username = "uid \(uid)"
@@ -508,9 +442,11 @@ final class HelperTool: NSObject, NSXPCListenerDelegate {
     }
 
     func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
-        guard let client = ValidatedClient(connection: connection) else {
-            return false
-        }
+        // The system checks every incoming message's audit token against the app's signature.
+        // Checking the client's PID instead could be raced: a process can queue messages and
+        // then exec into the signed app.
+        connection.setCodeSigningRequirement(clientCodeRequirement)
+        let client = ValidatedClient(connection: connection)
 
         let session = HelperSession(clientUser: client.user)
         connection.exportedInterface = NSXPCInterface(with: WireguardHelperProtocol.self)

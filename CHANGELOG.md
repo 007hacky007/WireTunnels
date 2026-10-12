@@ -7,6 +7,7 @@ This file tracks work in progress toward the next release and keeps the shipped 
 ### Security
 - **The helper installs the WireGuard tools itself** (issue #34, @tobikris). Previously the app picked the files and the helper copied them after checking hashes from a manifest in the same bundle. The app's checks could be raced, the hashes weren't anchored to anything the helper trusted, symlinks were followed, and `wg-quick` was never checked again after installation. Now the helper copies the tools only from its own app bundle into a staging folder only root can write, rejects anything that isn't a regular file, and checks each copy against anchors compiled into the helper: `wg` and `wireguard-go` must be signed by the app's team with their own identifier, and `wg-quick` must match the SHA-256 generated when the helper was built. `bin/` is replaced only when all three pass.
 - **Tools are checked before every run.** The helper installs at start and whenever a check fails. Right before launching a tool it checks it again (all three for `wg-quick`, only `wg` for other `wg` commands). A tool that fails is replaced from the bundle and the event is logged as an error, both in the system log (`tool-installer` category) and in the app's log as `Helper: …`.
+- **XPC clients are verified by audit token instead of PID** (#37, @tobikris). The helper trusted a caller after resolving its PID to code and checking the signature, and read the caller's uid via `proc_pidinfo`. A process could queue messages and then exec into the signed app, so the PID check passed while the queued messages came from the attacker. Now `setCodeSigningRequirement` has the system check the app's identifier and team against every incoming message's audit token, and the uid comes from `effectiveUserIdentifier`. The PID-based check is removed. A client that doesn't match is accepted and then disconnected at its first message.
 
 ### Changes
 - No more *Install Tools* / *Reinstall Tools* buttons. Approving the helper is enough; the setup wizard's second step is now *Prepare WireGuard Tools* with *Retry*, and connecting waits until the helper reports the tools ready.
@@ -32,6 +33,7 @@ This file tracks work in progress toward the next release and keeps the shipped 
 ```html
 <ul>
     <li>Security: the privileged helper now installs the WireGuard tools itself, only from the signed app, and checks them before every use; modified tools are replaced and logged</li>
+    <li>Security: the privileged helper checks the app's signature on every request, so another program can no longer impersonate WireTunnels</li>
     <li>No more Install Tools step: approving the helper is enough</li>
 </ul>
 <p><strong>Notes</strong></p>

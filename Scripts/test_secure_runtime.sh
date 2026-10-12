@@ -71,10 +71,14 @@ for protocol in "$APP_PROTOCOL" "$HELPER_PROTOCOL"; do
         fail "protocol must not accept arbitrary paths"
 done
 
-grep -q 'SecCodeCheckValidity' "$HELPER" ||
-    fail "helper must validate the XPC client signature"
-grep -q 'SecStaticCodeCheckValidity' "$HELPER" ||
-    fail "helper must validate the complete signed app bundle"
+grep -q 'connection.setCodeSigningRequirement(clientCodeRequirement)' "$HELPER" ||
+    fail "helper must check every XPC message's audit token against the app's signature"
+grep -q 'certificate leaf\[subject.OU\] = "\\(applicationTeamIdentifier)"' "$HELPER" ||
+    fail "XPC client requirement must be pinned to the app's team"
+grep -q 'connection.effectiveUserIdentifier' "$HELPER" ||
+    fail "helper must take the client uid from the audit token"
+! grep -q -e 'kSecGuestAttributePid' -e 'proc_pidinfo' "$HELPER" ||
+    fail "helper must not identify XPC clients by PID"
 grep -q 'runtimeConfigDir' "$HELPER" ||
     fail "helper must use the new runtime directory"
 grep -q 'legacyRuntimeConfigDirs' "$HELPER" ||
