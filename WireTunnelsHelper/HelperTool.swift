@@ -573,6 +573,31 @@ private final class HelperSession: NSObject, WireguardHelperProtocol {
         }
     }
 
+    func runtimeStatusSnapshot(reply: @escaping (Data?, String?) -> Void) {
+        let result = runCommand(
+            executable: systemBinDir.appendingPathComponent("wg"),
+            arguments: ["show", "all", "dump"]
+        )
+        guard result.exitCode == 0 else {
+            reply(nil, result.stderr.isEmpty ? "wg show failed" : result.stderr)
+            return
+        }
+        do {
+            let paths = try RuntimeConfigLocator.configPaths(
+                in: URL(fileURLWithPath: "/var/run/wireguard", isDirectory: true),
+                resolveConfig: { self.validatedRuntimeConfig(named: $0, allowLegacy: true) }
+            )
+            struct Snapshot: Encodable {
+                let output: String
+                let configPaths: [String: String]
+            }
+            let snapshot = Snapshot(output: Self.redactingPrivateKeys(in: result.stdout), configPaths: paths)
+            reply(try JSONEncoder().encode(snapshot), nil)
+        } catch {
+            reply(nil, "Unable to resolve active tunnel configurations: \(error.localizedDescription)")
+        }
+    }
+
     private static let resolverDirectory = "/etc/resolver"
     private static let resolverMarkerPrefix = "# Managed by WireTunnels"
 

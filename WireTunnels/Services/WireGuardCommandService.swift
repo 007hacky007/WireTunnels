@@ -432,6 +432,19 @@ final class WireGuardCommandService {
         }
     }
 
+    func getRuntimeStatusSnapshot() async throws -> WireGuardStatusSnapshot {
+        let data: Data = try await performHelperOperation(timeoutDescription: "Refreshing tunnel status") { helper, complete in
+            helper.runtimeStatusSnapshot { data, errorMessage in
+                if let data {
+                    complete(.success(data))
+                } else {
+                    complete(.failure(CommandError.statusFailed(errorMessage ?? "Unknown")))
+                }
+            }
+        }
+        return try JSONDecoder().decode(WireGuardStatusSnapshot.self, from: data)
+    }
+
     func generateKeyPair() async throws -> (privateKey: String, publicKey: String) {
         _ = try getHelper()
         return try await withCheckedThrowingContinuation { continuation in
