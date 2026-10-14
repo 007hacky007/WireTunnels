@@ -181,6 +181,7 @@ struct MenuBarView: View {
         }
         .frame(width: 300)
         .padding(.bottom, 4)
+        .background(MenuBarClickAwayDismissal().frame(width: 0, height: 0))
         .alert("WireTunnels Error", isPresented: managerErrorBinding) {
             Button("OK") {
                 tunnelManager.errorMessage = nil
