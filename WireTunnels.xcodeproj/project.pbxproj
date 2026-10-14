@@ -216,6 +216,8 @@
 				"$(SRCROOT)/Scripts/build_wireguard_binaries.sh",
 				"$(SRCROOT)/Scripts/wireguard-versions.env",
 				"$(SRCROOT)/Scripts/wg-quick-bash3.patch",
+				"$(SRCROOT)/Scripts/wg-quick-cleanup.patch",
+				"$(SRCROOT)/Scripts/wg-quick-active-dns.patch",
 				"$(SRCROOT)/WireTunnelsHelper/com.fmdigitech.WireTunnels.helper.plist",
 			);
 			name = "Build Wireguard Binaries";

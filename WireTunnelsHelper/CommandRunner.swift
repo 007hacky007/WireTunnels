@@ -127,7 +127,11 @@ enum CommandProgress {
     static func stage(for line: String) -> String? {
         guard line.hasPrefix("[#]") || line.hasPrefix("[+]") else { return nil }
         if line.contains("wireguard-go") { return "creating userspace interface" }
+        if line.contains("active network service(s) for DNS") { return "selecting active network services for DNS" }
+        if line.contains("Active DNS service lookup unavailable") { return "active DNS selection unavailable; using configured services" }
         if line.contains("wg setconf") || line.contains("wg addconf") { return "applying peer configuration and resolving endpoint" }
+        if line.contains("Restoring DNS after failed startup") { return "restoring DNS after failed startup" }
+        if line.contains("Failed to restore DNS during startup cleanup") { return "DNS restoration failed" }
         if line.contains("ifconfig") { return "configuring interface" }
         if line.contains("networksetup -getdnsservers") { return "reading existing DNS" }
         if line.contains("networksetup -getsearchdomains") { return "reading existing search domains" }

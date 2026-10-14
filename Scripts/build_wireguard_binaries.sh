@@ -11,6 +11,8 @@ source "$SCRIPT_DIR/wireguard-versions.env"
 
 ARCHS_OUT=(arm64 x86_64)
 PATCH_FILE="$SCRIPT_DIR/wg-quick-bash3.patch"
+CLEANUP_PATCH_FILE="$SCRIPT_DIR/wg-quick-cleanup.patch"
+ACTIVE_DNS_PATCH_FILE="$SCRIPT_DIR/wg-quick-active-dns.patch"
 CACHE_DIR="$SRCROOT/build/wireguard/tools-$WIREGUARD_TOOLS_VERSION-go-$WIREGUARD_GO_VERSION"
 OUT_DIR="${TARGET_BUILD_DIR:?}/${UNLOCALIZED_RESOURCES_FOLDER_PATH:?}/wireguard"
 
@@ -61,6 +63,8 @@ build() {
     echo "Patching wg-quick for /bin/bash 3.2"
     cp "$CACHE_DIR/wireguard-tools/src/wg-quick/darwin.bash" "$CACHE_DIR/wg-quick"
     patch --quiet "$CACHE_DIR/wg-quick" "$PATCH_FILE"
+    patch --quiet "$CACHE_DIR/wg-quick" "$CLEANUP_PATCH_FILE"
+    patch --quiet "$CACHE_DIR/wg-quick" "$ACTIVE_DNS_PATCH_FILE"
     /bin/bash -n "$CACHE_DIR/wg-quick"
 
     rm -rf "$OUT_DIR"
@@ -92,7 +96,7 @@ write_manifest() {
         echo '  "schemaVersion": 1,'
         echo "  \"generatedAt\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\","
         echo '  "source": "Built from upstream git.zx2c4.com sources",'
-        echo "  \"patches\": [{\"name\": \"wg-quick-bash3.patch\", \"sha256\": \"$(sha256 "$PATCH_FILE")\"}],"
+        echo "  \"patches\": [{\"name\": \"wg-quick-bash3.patch\", \"sha256\": \"$(sha256 "$PATCH_FILE")\"}, {\"name\": \"wg-quick-cleanup.patch\", \"sha256\": \"$(sha256 "$CLEANUP_PATCH_FILE")\"}, {\"name\": \"wg-quick-active-dns.patch\", \"sha256\": \"$(sha256 "$ACTIVE_DNS_PATCH_FILE")\"}],"
         echo '  "artifacts": ['
         artifact wg "$WIREGUARD_TOOLS_VERSION" "$WIREGUARD_TOOLS_URL" "$WIREGUARD_TOOLS_COMMIT"; echo ','
         artifact wg-quick "$WIREGUARD_TOOLS_VERSION" "$WIREGUARD_TOOLS_URL" "$WIREGUARD_TOOLS_COMMIT"; echo ','
