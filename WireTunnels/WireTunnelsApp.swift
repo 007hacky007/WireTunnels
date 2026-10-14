@@ -62,7 +62,8 @@ struct WireTunnelsApp: App {
         } label: {
             MenuBarIconView(hasActive: tunnelManager.hasActiveTunnels,
                             hasWarnings: !tunnelManager.activeWarnings.isEmpty,
-                            hasError: tunnelManager.errorMessage != nil)
+                            hasError: tunnelManager.errorMessage != nil,
+                            connectionStatus: tunnelManager.menuBarConnectionStatus)
         }
         .menuBarExtraStyle(.window)
 
@@ -95,11 +96,14 @@ private struct MenuBarIconView: View {
     let hasActive: Bool
     let hasWarnings: Bool
     let hasError: Bool
+    let connectionStatus: TunnelConnectionStatus
 
     var body: some View {
         Image(systemName: iconName)
             .symbolRenderingMode(monochromeMenuBarIcon ? .monochrome : .palette)
             .foregroundStyle(iconColor, .primary)
+            .help(iconDescription)
+            .accessibilityLabel("WireTunnels: \(iconDescription)")
             .task {
                 guard !launchInBackground else { return }
                 openWindow(id: "dashboard")
@@ -110,12 +114,22 @@ private struct MenuBarIconView: View {
     }
 
     private var iconName: String {
-        hasActive ? "network" : "network.slash"
+        connectionStatus.menuBarImage(hasWarnings: hasWarnings, hasError: hasError)
+    }
+
+    private var iconDescription: String {
+        if hasError { return "Error - open WireTunnels for details" }
+        if hasWarnings && (connectionStatus == .idle || connectionStatus == .connected) {
+            return "Warning - open WireTunnels for details"
+        }
+        return connectionStatus.description
     }
 
     private var iconColor: Color {
         if monochromeMenuBarIcon { return .primary }
         if hasError { return .red }
+        if connectionStatus == .connectionLost { return .red }
+        if connectionStatus == .connecting || connectionStatus == .reconnecting { return .orange }
         if hasWarnings { return .yellow }
         if hasActive { return .green }
         return .primary

@@ -22,6 +22,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='wiretunnels-tests-') as temporary:
         directory = Path(temporary)
         status_model = 'WireTunnels/Models/TunnelStatus.swift'
+        run_suite(directory, 'connection-feedback', ['WireTunnels/Models/TunnelConnectionFeedback.swift', 'Tests/TunnelConnectionFeedbackTests.swift'])
         run_suite(directory, 'awake-timeout', ['WireTunnels/Services/AwakeTimeout.swift', 'Tests/AwakeTimeoutTests.swift'])
         run_suite(directory, 'menu-dismissal', ['WireTunnels/Services/MenuBarDismissalController.swift', 'Tests/MenuBarDismissalTests.swift'])
         run_suite(directory, 'matching', [status_model, 'Tests/TunnelMatchingTests.swift'])
