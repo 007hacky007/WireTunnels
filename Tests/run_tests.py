@@ -25,6 +25,12 @@ def main():
         run_suite(directory, 'matching', [status_model, 'Tests/TunnelMatchingTests.swift'])
         run_suite(directory, 'status', [status_model,
                   'WireTunnels/Services/StatusMonitorService.swift', 'Tests/StatusMonitorTests.swift'])
+        run_suite(directory, 'duplication', [
+            'WireTunnels/Models/AutoConnectRule.swift', 'WireTunnels/Models/Tunnel.swift',
+            'WireTunnels/Services/AppPaths.swift', 'WireTunnels/Services/ConfigStorageService.swift',
+            'WireTunnels/Services/WireGuardConfigParser.swift',
+            'WireTunnels/Services/TunnelDuplicationService.swift', 'Tests/TunnelDuplicationTests.swift'
+        ])
         run_suite(directory, 'shared-endpoint', [status_model,
             'WireTunnels/Services/WireGuardConfigParser.swift',
             'WireTunnels/Services/StatusMonitorService.swift', 'Tests/SharedEndpointLifecycleTests.swift'

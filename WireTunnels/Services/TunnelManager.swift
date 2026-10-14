@@ -661,6 +661,24 @@ final class TunnelManager: ObservableObject {
 
     // MARK: - Config Management
 
+    @discardableResult
+    func duplicateTunnel(_ tunnel: Tunnel) throws -> Tunnel {
+        guard let source = tunnels.first(where: { $0.id == tunnel.id }) else {
+            throw TunnelDuplicationError.tunnelNotFound
+        }
+        let reservedNames = statusMonitor.statusMap.values.compactMap { $0.runtimeConfigPath }.map {
+            URL(fileURLWithPath: $0).deletingPathExtension().lastPathComponent
+        }
+        let copy = try TunnelDuplicationService(configStorage: configStorage).duplicate(
+            source, existingTunnels: tunnels, reservedConfigNames: reservedNames
+        )
+        tunnels.append(copy)
+        savePersonalTunnelsOnly()
+        updateWarnings()
+        log.info("Duplicated tunnel: \(source.name) -> \(copy.name)")
+        return copy
+    }
+
     func importConfig(from url: URL) async throws {
         log.info("Importing config: \(url.lastPathComponent)")
         let parsed = try parser.parse(contentsOf: url)
