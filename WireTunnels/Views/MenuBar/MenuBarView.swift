@@ -6,6 +6,7 @@ struct MenuBarView: View {
     @EnvironmentObject var tunnelManager: TunnelManager
     @EnvironmentObject var dashboardNavigation: DashboardNavigation
     @Environment(\.openWindow) var openWindow
+    @Environment(\.openSettings) var openSettings
 
     private var activeTunnels: [Tunnel] {
         tunnelManager.tunnels.filter { $0.isActive }
@@ -129,13 +130,12 @@ struct MenuBarView: View {
                 openDashboard()
             }
 
-            SettingsLink {
-                MenuActionLabel(label: "Settings", systemImage: "gear")
+            MenuActionButton(label: "Settings", systemImage: "gear") {
+                MenuBarDismissalController.performNavigation {
+                    NSApp.activate(ignoringOtherApps: true)
+                    openSettings()
+                }
             }
-            .buttonStyle(.borderless)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 5)
-            .frame(maxWidth: .infinity, alignment: .leading)
 
             Divider()
                 .padding(.vertical, 2)
@@ -180,18 +180,20 @@ struct MenuBarView: View {
     }
 
     private func openDashboard(tunnelID: UUID? = nil) {
-        NSApp.activate(ignoringOtherApps: true)
-        openWindow(id: "dashboard")
-        if let tunnelID {
-            dashboardNavigation.requestTunnel(tunnelID)
-        }
-        DispatchQueue.main.async {
-            NSApp.windows
-                .filter { $0.title == "WireTunnels" }
-                .forEach {
-                    $0.deminiaturize(nil)
-                    $0.makeKeyAndOrderFront(nil)
-                }
+        MenuBarDismissalController.performNavigation {
+            NSApp.activate(ignoringOtherApps: true)
+            openWindow(id: "dashboard")
+            if let tunnelID {
+                dashboardNavigation.requestTunnel(tunnelID)
+            }
+            DispatchQueue.main.async {
+                NSApp.windows
+                    .filter { $0.title == "WireTunnels" }
+                    .forEach {
+                        $0.deminiaturize(nil)
+                        $0.makeKeyAndOrderFront(nil)
+                    }
+            }
         }
     }
 }
