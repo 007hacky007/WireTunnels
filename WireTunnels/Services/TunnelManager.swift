@@ -516,6 +516,8 @@ final class TunnelManager: ObservableObject {
         defer { connectingTunnels.remove(liveTunnel.id) }
         if !isAutoConnect { networkMonitor.userDidConnect(liveTunnel.id) }
         log.info("\(isAutoConnect ? "Auto-connecting" : "Starting") tunnel: \(liveTunnel.name)")
+        let connectStarted = ProcessInfo.processInfo.systemUptime
+        log.info("Connect \(liveTunnel.name): active tunnels=\(tunnels.filter(\.isActive).count), scope=\(liveTunnel.scope.rawValue), helper=\(commandService.helperStatusDescription)")
 
         // Copy config to runtime dir via helper
         let runtimePath = AppPaths.runtimeConfigDir
@@ -530,7 +532,9 @@ final class TunnelManager: ObservableObject {
 
             let stagedRuntimePath: String
             if liveTunnel.scope == .managed {
-                stagedRuntimePath = try await commandService.stageManagedConfig(id: liveTunnel.id)
+                stagedRuntimePath = try await log.timed("Connect \(liveTunnel.name): staging managed config") {
+                    try await self.commandService.stageManagedConfig(id: liveTunnel.id)
+                }
             } else {
                 var sourcePath = liveTunnel.configPath
                 var dnsStrippedTempURL: URL?
@@ -542,10 +546,14 @@ final class TunnelManager: ObservableObject {
                     sourcePath = tempURL.path
                 }
                 defer { if let dnsStrippedTempURL { try? FileManager.default.removeItem(at: dnsStrippedTempURL) } }
-                try await commandService.copyConfig(from: sourcePath, to: runtimePath)
+                try await log.timed("Connect \(liveTunnel.name): staging personal config") {
+                    try await self.commandService.copyConfig(from: sourcePath, to: runtimePath)
+                }
                 stagedRuntimePath = runtimePath
             }
-            try await commandService.startTunnel(configPath: stagedRuntimePath)
+            try await log.timed("Connect \(liveTunnel.name): starting WireGuard") {
+                try await self.commandService.startTunnel(configPath: stagedRuntimePath)
+            }
             if liveTunnel.scope == .managed {
                 do {
                     try await commandService.markManagedTunnelConnected(id: liveTunnel.id)
@@ -562,7 +570,9 @@ final class TunnelManager: ObservableObject {
             tunnels[index].updatedAt = Date()
             savePersonalTunnelsOnly()
             updateWarnings()
-            await refreshStatus()
+            await log.timed("Connect \(liveTunnel.name): confirming runtime status") {
+                await self.refreshStatus()
+            }
             if tunnels[index].isKillSwitchEnabled {
                 await armKillSwitch(for: tunnels[index])
             }
@@ -570,10 +580,10 @@ final class TunnelManager: ObservableObject {
                 await syncExcludedRoutes(for: tunnels[index])
             }
             await syncSplitDNSState()
-            log.info("Tunnel \(liveTunnel.name) connected")
+            log.info("Tunnel \(liveTunnel.name) connected in \(String(format: "%.3f", ProcessInfo.processInfo.systemUptime - connectStarted))s; interface=\(tunnels[index].interfaceName ?? "unknown")")
             try? await notificationService.postConnected(tunnelName: liveTunnel.name)
         } catch {
-            log.error("Failed to connect \(liveTunnel.name): \(error.localizedDescription)")
+            log.error("Failed to connect \(liveTunnel.name) after \(String(format: "%.3f", ProcessInfo.processInfo.systemUptime - connectStarted))s: \(error.localizedDescription)")
             errorMessage = "Failed to connect \(liveTunnel.name): \(error.localizedDescription)"
             try? await notificationService.postError(
                 tunnelName: liveTunnel.name,
@@ -591,8 +601,10 @@ final class TunnelManager: ObservableObject {
         }
         if !isAutoDisconnect { networkMonitor.userDidDisconnect(liveTunnel.id) }
         log.info("\(isAutoDisconnect ? "Auto-disconnecting" : "Stopping") tunnel: \(liveTunnel.name)")
+        let disconnectStarted = ProcessInfo.processInfo.systemUptime
 
         let configPath = liveTunnel.runtimeConfigPath ?? liveTunnel.configPath
+        log.info("Disconnect \(liveTunnel.name): runtime config=\(URL(fileURLWithPath: configPath).lastPathComponent), interface=\(liveTunnel.interfaceName ?? "unknown")")
 
         do {
             if liveTunnel.scope == .managed,
@@ -626,10 +638,10 @@ final class TunnelManager: ObservableObject {
             savePersonalTunnelsOnly()
             updateWarnings()
             await syncSplitDNSState()
-            log.info("Tunnel \(liveTunnel.name) disconnected")
+            log.info("Tunnel \(liveTunnel.name) disconnected in \(String(format: "%.3f", ProcessInfo.processInfo.systemUptime - disconnectStarted))s")
             try? await notificationService.postDisconnected(tunnelName: liveTunnel.name)
         } catch {
-            log.error("Failed to disconnect \(liveTunnel.name): \(error.localizedDescription)")
+            log.error("Failed to disconnect \(liveTunnel.name) after \(String(format: "%.3f", ProcessInfo.processInfo.systemUptime - disconnectStarted))s: \(error.localizedDescription)")
             errorMessage = "Failed to disconnect \(liveTunnel.name): \(error.localizedDescription)"
             try? await notificationService.postError(
                 tunnelName: liveTunnel.name,
@@ -917,12 +929,19 @@ final class TunnelManager: ObservableObject {
             let status = matched[index]
 
             if let status = status {
+                if !updatedTunnels[index].isActive || updatedTunnels[index].interfaceName != status.interfaceName {
+                    log.info("Status \(updatedTunnels[index].name): matched \(status.interfaceName), runtime config=\(status.runtimeConfigPath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "unresolved")")
+                }
                 updatedTunnels[index].isActive = true
                 // Learn and persist the real kernel interface name (utun*)
                 updatedTunnels[index].interfaceName = status.interfaceName
-                // Preserve the original live config path for down and reconnect.
-                // An unresolved alias must not erase the path recorded at connect.
+                // The live config can outlast a rename or deletion of the user's
+                // profile. Use wg-quick's original file for down and reconnect;
+                // an unresolved alias must not erase the path recorded at connect.
                 if let runtimePath = status.runtimeConfigPath {
+                    if updatedTunnels[index].runtimeConfigPath != runtimePath {
+                        log.info("Resolved runtime configuration for \(updatedTunnels[index].name): \(URL(fileURLWithPath: runtimePath).lastPathComponent) (\(status.interfaceName))")
+                    }
                     updatedTunnels[index].runtimeConfigPath = runtimePath
                 }
                 if let peer = status.peers.first {
@@ -944,6 +963,7 @@ final class TunnelManager: ObservableObject {
             } else {
                 // Not in wg show → not active
                 if updatedTunnels[index].isActive {
+                    log.info("Status \(updatedTunnels[index].name): interface no longer present in the helper snapshot")
                     updatedTunnels[index].isActive = false
                     updatedTunnels[index].lastHandshake = nil
                     updatedTunnels[index].rxBytes = 0
