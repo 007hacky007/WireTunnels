@@ -4,7 +4,7 @@ import Foundation
 import Security
 
 private let helperVersionNumber = "1.0.6"
-private let helperProtocolRevisionValue = "command-diagnostics-v1"
+private let helperProtocolRevisionValue = "dns-recovery-v1"
 private let applicationIdentifier = "com.fmdigitech.WireTunnels"
 private let applicationTeamIdentifier = "48W4Z4X56T"
 private let systemRoot = URL(fileURLWithPath: "/Library/Application Support/WireTunnels")
@@ -491,6 +491,13 @@ final class HelperTool: NSObject, NSXPCListenerDelegate {
     }
 
     func run() {
+        // Retry persistent cleanup after a helper restart without delaying XPC.
+        if FileManager.default.fileExists(atPath: DNSRecoveryService.systemDirectory.path),
+           let executable = Bundle.main.executableURL {
+            DispatchQueue.global(qos: .utility).async {
+                _ = CommandRunner().run(executable: executable, arguments: ["--dns-recover"], timeout: 15, terminationGrace: 3)
+            }
+        }
         listener.resume()
         RunLoop.main.run()
     }
@@ -544,6 +551,10 @@ private final class HelperSession: NSObject, WireguardHelperProtocol {
         ))?.values.contains(configURL.path) == true
 
         let environment = wireGuardEnvironment()
+        guard recoverDNS().exitCode == 0 else {
+            reply(false, "Unable to recover DNS from a previous tunnel operation")
+            return
+        }
         let result = runCommand(
             executable: systemBinDir.appendingPathComponent("wg-quick"),
             arguments: ["up", configURL.path],
@@ -567,7 +578,11 @@ private final class HelperSession: NSObject, WireguardHelperProtocol {
                     )
                 }
             }
-            reply(false, result.stderr.isEmpty ? result.stdout : result.stderr)
+            // The startup group may have been killed while restoring DNS. A
+            // fresh process releases only this attempt, even without an alias.
+            let recovery = recoverDNS(token: alreadyRunning ? nil : environment["WIRETUNNELS_DNS_TOKEN"])
+            let message = result.stderr.isEmpty ? result.stdout : result.stderr
+            reply(false, recovery.exitCode == 0 ? message : message + "; DNS cleanup remains pending and will be retried")
         }
     }
 
@@ -582,10 +597,12 @@ private final class HelperSession: NSObject, WireguardHelperProtocol {
             arguments: ["down", configURL.path],
             environment: wireGuardEnvironment()
         )
-        if result.exitCode == 0 {
+        let recovery = recoverDNS()
+        if result.exitCode == 0 && recovery.exitCode == 0 {
             reply(true, nil)
         } else {
-            reply(false, result.stderr.isEmpty ? result.stdout : result.stderr)
+            let message = result.stderr.isEmpty ? result.stdout : result.stderr
+            reply(false, recovery.exitCode == 0 ? message : "DNS cleanup remains pending and will be retried")
         }
     }
 
@@ -1741,11 +1758,20 @@ private final class HelperSession: NSObject, WireguardHelperProtocol {
         ], ofItemAtPath: url.path)
     }
 
+    private func recoverDNS(token: String? = nil) -> (stdout: String, stderr: String, exitCode: Int32) {
+        guard let executable = Bundle.main.executableURL else { return ("", "DNS recovery helper is unavailable", -1) }
+        return runCommand(executable: executable,
+                          arguments: token.map { ["--dns-release", $0] } ?? ["--dns-recover"], timeout: 15)
+    }
+
     private func wireGuardEnvironment() -> [String: String] {
         var environment = ProcessInfo.processInfo.environment
         environment["WG_QUICK_USERSPACE_IMPLEMENTATION"] =
             systemBinDir.appendingPathComponent("wireguard-go").path
         environment["WG_SUDO"] = "1"
+        environment["WIRETUNNELS_DNS_HELPER"] = Bundle.main.executableURL?.path
+        environment["WIRETUNNELS_DNS_TOKEN"] = UUID().uuidString
+        environment.removeValue(forKey: "WIRETUNNELS_DNS_SOCKET_ID")
         return environment
     }
 
