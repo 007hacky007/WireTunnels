@@ -30,6 +30,7 @@ def main():
         run_suite(directory, 'readiness', ['WireTunnels/Models/WireGuardRuntimeStatus.swift',
                   'WireTunnels/Models/WireGuardEnvironment.swift', 'WireTunnels/Models/TunnelConnectionReadiness.swift',
                   'Tests/TunnelConnectionReadinessTests.swift'])
+        run_suite(directory, 'connection-feedback', ['WireTunnels/Models/TunnelConnectionFeedback.swift', 'Tests/TunnelConnectionFeedbackTests.swift'])
         run_suite(directory, 'awake-timeout', ['WireTunnels/Services/AwakeTimeout.swift', 'Tests/AwakeTimeoutTests.swift'])
         run_suite(directory, 'menu-dismissal', ['WireTunnels/Services/MenuBarDismissalController.swift', 'Tests/MenuBarDismissalTests.swift'])
         run_suite(directory, 'matching', [status_model, 'Tests/TunnelMatchingTests.swift'])
