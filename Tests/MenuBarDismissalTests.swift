@@ -52,6 +52,16 @@ struct MenuBarDismissalTests {
         click(statusWindow)
         guard menu.isVisible else { fatalError("Clicking the menu bar icon closed the menu before it could toggle") }
 
+        dashboard.orderOut(nil)
+        menu.orderFront(nil)
+        MenuBarDismissalController.performNavigation {
+            guard !menu.isVisible else {
+                fatalError("Navigation ran before the menu was dismissed")
+            }
+            dashboard.orderFront(nil)
+        }
+        guard dashboard.isVisible else { fatalError("Navigation did not open its destination") }
+
         menu.orderFront(nil)
         NotificationCenter.default.post(name: NSApplication.didResignActiveNotification, object: app)
         guard !menu.isVisible, dashboard.isVisible else { fatalError("Switching to another application left the menu open") }
@@ -60,6 +70,8 @@ struct MenuBarDismissalTests {
         menu.orderFront(nil)
         click(dashboard)
         guard menu.isVisible else { fatalError("Detached menu monitor kept dismissing windows") }
-        print("PASS: outside clicks dismiss only the menu, inside controls work, and monitors detach")
+        MenuBarDismissalController.performNavigation {}
+        guard menu.isVisible else { fatalError("Detached navigation observer kept dismissing windows") }
+        print("PASS: outside clicks and navigation dismiss only the menu, inside controls work, and observers detach")
     }
 }

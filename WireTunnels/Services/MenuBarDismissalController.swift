@@ -3,13 +3,20 @@ import AppKit
 /// A window-style menu extra also needs clicks delivered to other windows/apps.
 @MainActor
 final class MenuBarDismissalController {
+    private static let navigationRequested = Notification.Name("WireTunnels.menuBarNavigationRequested")
     private weak var window: NSWindow?
     private var localMonitor: Any?
     private var globalMonitor: Any?
     private var deactivateObserver: NSObjectProtocol?
+    private var navigationObserver: NSObjectProtocol?
 
     init(window: NSWindow) {
         self.window = window
+    }
+
+    static func performNavigation(_ action: () -> Void) {
+        NotificationCenter.default.post(name: navigationRequested, object: nil)
+        action()
     }
 
     func start() {
@@ -27,15 +34,22 @@ final class MenuBarDismissalController {
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.dismissIfOutside(nil) }
         }
+        navigationObserver = NotificationCenter.default.addObserver(
+            forName: Self.navigationRequested, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.window?.close() }
+        }
     }
 
     func stop() {
         if let localMonitor { NSEvent.removeMonitor(localMonitor) }
         if let globalMonitor { NSEvent.removeMonitor(globalMonitor) }
         if let deactivateObserver { NotificationCenter.default.removeObserver(deactivateObserver) }
+        if let navigationObserver { NotificationCenter.default.removeObserver(navigationObserver) }
         localMonitor = nil
         globalMonitor = nil
         deactivateObserver = nil
+        navigationObserver = nil
     }
 
     private func dismissIfOutside(_ clickedWindow: NSWindow?) {
@@ -54,5 +68,6 @@ final class MenuBarDismissalController {
         if let localMonitor { NSEvent.removeMonitor(localMonitor) }
         if let globalMonitor { NSEvent.removeMonitor(globalMonitor) }
         if let deactivateObserver { NotificationCenter.default.removeObserver(deactivateObserver) }
+        if let navigationObserver { NotificationCenter.default.removeObserver(navigationObserver) }
     }
 }
