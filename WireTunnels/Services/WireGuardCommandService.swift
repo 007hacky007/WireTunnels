@@ -233,14 +233,14 @@ final class WireGuardCommandService {
             }
             slowTask = Task { @MainActor in
                 while !Task.isCancelled {
-                    try? await Task.sleep(nanoseconds: 5_000_000_000)
+                    try? await AwakeTimeout.wait(nanoseconds: 5_000_000_000)
                     guard !Task.isCancelled else { return }
                     LogService.shared.warning("Helper request \(operationID): \(timeoutDescription) still waiting after \(String(format: "%.1f", ProcessInfo.processInfo.systemUptime - started))s")
                 }
             }
 
             let timeoutTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(nanoseconds: timeoutNanoseconds)
+                try? await AwakeTimeout.wait(nanoseconds: timeoutNanoseconds)
                 guard !Task.isCancelled else { return }
                 if invalidateOnTimeout { self?.invalidateConnection() }
                 resume(.failure(CommandError.operationTimedOut(timeoutDescription)))
@@ -278,7 +278,7 @@ final class WireGuardCommandService {
             }
 
             let timeoutTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(nanoseconds: Self.helperCheckTimeoutNanoseconds)
+                try? await AwakeTimeout.wait(nanoseconds: Self.helperCheckTimeoutNanoseconds)
                 guard !Task.isCancelled else { return }
                 self?.invalidateConnection()
                 resume(.failure(CommandError.helperCheckTimedOut))
@@ -316,7 +316,7 @@ final class WireGuardCommandService {
             }
 
             let timeoutTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(nanoseconds: Self.helperCheckTimeoutNanoseconds)
+                try? await AwakeTimeout.wait(nanoseconds: Self.helperCheckTimeoutNanoseconds)
                 guard !Task.isCancelled else { return }
                 self?.invalidateConnection()
                 resume(.failure(CommandError.helperCheckTimedOut))
@@ -354,7 +354,7 @@ final class WireGuardCommandService {
             }
 
             let timeoutTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(nanoseconds: Self.toolInstallTimeoutNanoseconds)
+                try? await AwakeTimeout.wait(nanoseconds: Self.toolInstallTimeoutNanoseconds)
                 guard !Task.isCancelled else { return }
                 self?.invalidateConnection()
                 resume(.failure(CommandError.operationTimedOut("Installing WireGuard tools")))
@@ -514,7 +514,7 @@ final class WireGuardCommandService {
             }
 
             let timeoutTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(nanoseconds: Self.keyGenerationTimeoutNanoseconds)
+                try? await AwakeTimeout.wait(nanoseconds: Self.keyGenerationTimeoutNanoseconds)
                 guard !Task.isCancelled else { return }
                 self?.invalidateConnection()
                 resume(.failure(CommandError.keyGenerationFailed("Request timed out")))
