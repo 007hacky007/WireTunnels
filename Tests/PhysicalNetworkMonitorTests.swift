@@ -1,45 +1,7 @@
 import Foundation
 
-// Controlled Network.framework boundary. These fixtures are the two different
-// route views supplied by macOS while a userspace VPN owns the default route.
-// No host interfaces, routes, DNS settings or tunnels are changed by this test.
-private struct NWInterface {
-    enum InterfaceType: Hashable { case wifi, wiredEthernet, other, loopback }
-    let name: String
-    let type: InterfaceType
-}
-
-private struct NWPath {
-    var availableInterfaces: [NWInterface] = []
-    func usesInterfaceType(_ type: NWInterface.InterfaceType) -> Bool {
-        availableInterfaces.contains { $0.type == type }
-    }
-}
-
-private final class NWPathMonitor {
-    static var created: NWPathMonitor?
-    var currentPath = NWPath()
-    var pathUpdateHandler: ((NWPath) -> Void)?
-    private let prohibited: [NWInterface.InterfaceType]
-
-    init() { prohibited = []; Self.created = self }
-    init(prohibitedInterfaceTypes: [NWInterface.InterfaceType]) {
-        prohibited = prohibitedInterfaceTypes
-        Self.created = self
-    }
-    func start(queue: DispatchQueue) {}
-    func cancel() {}
-    func deliver(defaultPath: NWPath, physicalPath: NWPath) {
-        // A monitor that allows VPN interfaces receives the VPN default path.
-        currentPath = prohibited.contains(.other) ? physicalPath : defaultPath
-        pathUpdateHandler?(currentPath)
-    }
-}
-
-// PRODUCTION_NETWORK_MONITOR
-
 @main
-private struct PhysicalNetworkMonitorTests {
+struct PhysicalNetworkMonitorTests {
     @MainActor
     static func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
         guard condition() else { print("FAIL: \(message)"); exit(1) }
@@ -47,48 +9,86 @@ private struct PhysicalNetworkMonitorTests {
 
     @MainActor
     static func main() async throws {
-        let service = NetworkMonitorService()
-        let monitor = NWPathMonitor.created!
-        let wifi = NWPath(availableInterfaces: [.init(name: "test-wifi", type: .wifi)])
-        let ethernet = NWPath(availableInterfaces: [.init(name: "test-wired", type: .wiredEthernet)])
-        let vpn = NWPath(availableInterfaces: [.init(name: "utun42", type: .other)])
-        let offline = NWPath()
+        let logURL = FileManager.default.temporaryDirectory.appendingPathComponent("physical-network-\(UUID().uuidString).log")
+        defer { try? FileManager.default.removeItem(at: logURL) }
+        func wifi(_ address: String = "192.0.2.10") -> PhysicalNetworkSnapshot {
+            PhysicalNetworkSnapshot(interfaces: [.init(name: "en0", kind: .wifi, isLinkActive: true,
+                addresses: [address, "fe80::1%en0"])], preferredPrimaryInterface: "en0")
+        }
+        var physical: PhysicalNetworkSnapshot? = wifi()
+        let service = NetworkMonitorService(readPhysicalNetwork: { physical }, diagnostics: LogService(logFile: logURL))
         var changes = 0
+        var renewals = 0
         service.onNetworkChange = { changes += 1 }
+        service.onLocalAddressChange = { renewals += 1 }
+        var tunnel = Tunnel(name: "Synthetic tunnel", configPath: "/private/tmp/synthetic.conf")
+        tunnel.autoConnectRule.connect = .init(enabled: true, interface: .wifi)
+        await service.refreshNetworkState()
+        expect(service.matchesConnect(tunnel), "physical Wi-Fi must match before tunnel startup")
+        let beforeRouteChanges = changes
 
-        func deliver(_ defaultPath: NWPath, _ physicalPath: NWPath) async throws {
-            let before = changes
-            monitor.deliver(defaultPath: defaultPath, physicalPath: physicalPath)
-            for _ in 0..<1_000 {
-                if changes > before { return }
-                try await Task.sleep(nanoseconds: 1_000_000)
-            }
-            expect(false, "network observation was not delivered")
+        // Recorded macOS behavior: default and prohibited-interface NWPath monitors
+        // both flip to wifi=false during wg-quick up, while the physical link/IP
+        // state below remains unchanged. Refresh the real service for those events.
+        for _ in 0..<10 {
+            await service.refreshNetworkState()
+            expect(service.matchesConnect(tunnel), "VPN route changes must not break a physical Wi-Fi rule")
         }
-        let wifiRule = AutoConnectNetworkMatch(enabled: true, interface: .wifi)
-        let ethernetRule = AutoConnectNetworkMatch(enabled: true, interface: .ethernet)
-        func matches(_ rule: AutoConnectNetworkMatch) -> Bool {
-            var tunnel = Tunnel(name: "Synthetic tunnel", configPath: "/private/tmp/synthetic.conf")
-            tunnel.autoConnectRule.connect = rule
-            return service.matchesConnect(tunnel)
-        }
+        expect(changes == beforeRouteChanges && renewals == 0,
+            "unchanged physical state must not trigger disconnects or renewal reconnects")
+        physical = nil
+        await service.refreshNetworkState()
+        expect(service.matchesConnect(tunnel) && changes == beforeRouteChanges,
+            "an unavailable system snapshot must not be mistaken for a physical disconnect")
 
-        try await deliver(wifi, wifi)
-        expect(matches(wifiRule), "Wi-Fi must match before a tunnel starts")
-        for _ in 0..<3 {
-            try await deliver(vpn, wifi)
-            expect(matches(wifiRule), "a VPN default route must not make the Wi-Fi connect rule stop matching")
-            try await deliver(wifi, wifi)
-            expect(matches(wifiRule), "Wi-Fi must remain matched when the VPN route is removed")
+        physical = wifi("192.0.2.20")
+        await service.refreshNetworkState()
+        expect(renewals == 1 && changes == beforeRouteChanges + 1,
+            "an actual DHCP renewal must still trigger exactly one reconnect and rule evaluation")
+        func both(_ ethernetAddress: String, ipv6: String = "2001:db8::20", primary: String) -> PhysicalNetworkSnapshot {
+            PhysicalNetworkSnapshot(interfaces: [
+                .init(name: "en0", kind: .wifi, isLinkActive: true, addresses: ["192.0.2.20"]),
+                .init(name: "en7", kind: .ethernet, isLinkActive: true, addresses: [ethernetAddress, ipv6])
+            ], preferredPrimaryInterface: primary)
         }
-        try await deliver(vpn, ethernet)
-        expect(matches(ethernetRule) && !matches(wifiRule),
-            "a real switch to Ethernet must be observed even while the VPN owns the default route")
-        try await deliver(vpn, offline)
-        expect(!matches(ethernetRule) && !matches(wifiRule),
-            "physical link loss must stop matching even if a VPN interface still exists")
-        try await deliver(vpn, wifi)
-        expect(matches(wifiRule), "physical Wi-Fi reconnection must restore matching")
-        print("PASS: production network monitoring preserves physical rules across VPN routes and observes real switches and link loss")
+        physical = both("198.51.100.10", primary: "en7")
+        await service.refreshNetworkState()
+        physical = both("198.51.100.10", primary: "utun42")
+        await service.refreshNetworkState()
+        expect(renewals == 1, "a VPN becoming the global primary must not look like DHCP renewal")
+        physical = both("198.51.100.20", primary: "utun42")
+        await service.refreshNetworkState()
+        expect(renewals == 2,
+            "Ethernet DHCP renewal must be detected while Wi-Fi and a VPN global primary are also present")
+        physical = both("198.51.100.20", ipv6: "2001:db8::21", primary: "utun42")
+        await service.refreshNetworkState()
+        expect(renewals == 2, "an IPv6-only change must reevaluate subnets without an IPv4 restart")
+        physical = PhysicalNetworkSnapshot(interfaces: [
+            .init(name: "en0", kind: .wifi, isLinkActive: false, addresses: ["192.0.2.20"]),
+            .init(name: "en7", kind: .ethernet, isLinkActive: true, addresses: ["198.51.100.20", "2001:db8::20"])
+        ], preferredPrimaryInterface: "en7")
+        await service.refreshNetworkState()
+        expect(!service.matchesConnect(tunnel), "an actual Wi-Fi link loss must stop matching even with stale addresses")
+        tunnel.autoConnectRule.connect = .init(enabled: true, interface: .ethernet)
+        expect(service.matchesConnect(tunnel), "the active Ethernet interface must match its rule")
+        expect(service.ethernetAddresses == ["198.51.100.20", "2001:db8::20"],
+            "only active Ethernet addresses may be published")
+        expect(renewals == 2, "a real interface switch must not count as DHCP renewal")
+        physical = PhysicalNetworkSnapshot(interfaces: [
+            .init(name: "en7", kind: .ethernet, isLinkActive: false, addresses: ["198.51.100.20"])
+        ], preferredPrimaryInterface: "en7")
+        await service.refreshNetworkState()
+        expect(!service.matchesConnect(tunnel) && service.ethernetAddresses.isEmpty,
+            "an unplugged Ethernet interface with stale IPs must not match")
+        physical = PhysicalNetworkSnapshot(interfaces: [
+            .init(name: "en7", kind: .ethernet, isLinkActive: true, addresses: [])
+        ], preferredPrimaryInterface: "en7")
+        await service.refreshNetworkState()
+        expect(!service.isOnEthernet, "a link without configured addresses must not match")
+        physical = wifi()
+        await service.refreshNetworkState()
+        tunnel.autoConnectRule.connect.interface = .wifi
+        expect(service.matchesConnect(tunnel), "physical Wi-Fi reconnection must restore matching")
+        print("PASS: physical link rules ignore VPN routes and handle DHCP, real link loss, switches, and unavailable snapshots")
     }
 }
