@@ -20,7 +20,10 @@ final class NetworkMonitorService: NSObject, ObservableObject {
     // On-Demand rules can never match even though "Any Wi-Fi" rules work fine.
     @Published private(set) var hasWiFiNamePermission: Bool = false
 
-    private let monitor = NWPathMonitor()
+    // On-Demand rules describe the physical network. A userspace VPN can
+    // replace the default path with an "other" (utun) interface, which would
+    // otherwise make its own connect rule stop matching and tear it down.
+    private let monitor = NWPathMonitor(prohibitedInterfaceTypes: [.other, .loopback])
     private let queue   = DispatchQueue(label: "com.fmdigitech.WireTunnels.netmon", qos: .utility)
     private let log     = Logger(subsystem: "com.fmdigitech.WireTunnels", category: "NetworkMonitor")
     private let locationManager = CLLocationManager()
