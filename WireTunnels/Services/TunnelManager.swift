@@ -670,8 +670,8 @@ final class TunnelManager: ObservableObject {
         let savedURL = try configStorage.importConfig(from: url)
 
         // The saved file may carry a shortened interface-safe name; the user keeps the full one.
-        let name = ConfigStorageService.sanitize(
-            name: url.deletingPathExtension().lastPathComponent
+        let name = ConfigStorageService.displayName(
+            for: url.deletingPathExtension().lastPathComponent
         )
         var tunnel = Tunnel(name: name, configPath: savedURL.path)
         tunnel.address = parsed.address
@@ -733,7 +733,7 @@ final class TunnelManager: ObservableObject {
         }
         let savedURL = try configStorage.saveConfig(name: name, content: configContent)
 
-        let storedName = ConfigStorageService.sanitize(name: name)
+        let storedName = ConfigStorageService.displayName(for: name)
         var tunnel = Tunnel(name: storedName, configPath: savedURL.path)
         tunnel.address = parsed.address
         tunnel.allowedIPs = parsed.allowedIPs
@@ -778,6 +778,7 @@ final class TunnelManager: ObservableObject {
             return
         }
 
+        let name = ConfigStorageService.displayName(for: name)
         let isSameConfig = name == liveTunnel.name
         let oldURL = URL(fileURLWithPath: liveTunnel.configPath)
         let oldContents = try configStorage.readConfig(at: oldURL)
