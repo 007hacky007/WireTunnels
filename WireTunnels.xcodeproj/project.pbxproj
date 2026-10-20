@@ -64,6 +64,11 @@
 			path = WireTunnels;
 			sourceTree = "<group>";
 		};
+		ABCD00112FDC11AA00000001 /* Shared */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Shared;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -88,6 +93,7 @@
 		DCF55B972FDC10DD00D04602 = {
 			isa = PBXGroup;
 			children = (
+				ABCD00112FDC11AA00000001 /* Shared */,
 				DCF55BA22FDC10DD00D04602 /* WireTunnels */,
 				AAAA00012FDC11AA00000001 /* WireTunnelsHelper */,
 				DCF55BA12FDC10DD00D04602 /* Products */,
@@ -118,6 +124,7 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
+				ABCD00112FDC11AA00000001 /* Shared */,
 				AAAA00012FDC11AA00000001 /* WireTunnelsHelper */,
 			);
 			name = WireTunnelsHelper;
@@ -143,6 +150,7 @@
 				AAAA000C2FDC11AA0000000C /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
+				ABCD00112FDC11AA00000001 /* Shared */,
 				DCF55BA22FDC10DD00D04602 /* WireTunnels */,
 			);
 			name = WireTunnels;

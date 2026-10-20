@@ -164,7 +164,7 @@ struct TunnelDetailView: View {
                         DetailRow(label: "Endpoint", value: endpoint)
                     }
                     if !live.allowedIPs.isEmpty {
-                        DetailRow(label: "Allowed IPs", value: live.allowedIPs.joined(separator: "\n"))
+                        DetailRow(label: "Allowed IPs", value: live.allowedIPs.prefix(20).joined(separator: "\n") + (live.allowedIPs.count > 20 ? "\n… \(live.allowedIPs.count) total prefixes" : ""))
                     }
                     if !live.dns.isEmpty {
                         DetailRow(label: "DNS", value: live.dns.joined(separator: ", "))
@@ -177,6 +177,10 @@ struct TunnelDetailView: View {
                 Divider()
 
                 // Runtime stats
+                if !isManaged {
+                    InventorySettingsView(tunnel: live)
+                    Divider()
+                }
                 DetailSection(title: "Status") {
                     if let connectedAt = live.connectedAt {
                         DetailRow(label: "Connected for", value: formatDuration(since: connectedAt))

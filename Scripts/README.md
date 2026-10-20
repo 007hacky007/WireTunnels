@@ -1,4 +1,53 @@
-# Server inventory example
+# Inventory AllowedIPs
+
+WireTunnels can run a local inventory command after a personal tunnel connects,
+then append its IP addresses/CIDRs to the saved configuration's static AllowedIPs
+and install the additional routes on that tunnel. The command runs as your normal
+user. Only the validated routing update goes through the privileged helper.
+
+Disconnect the tunnel, open its **Inventory AllowedIPs** section, and set:
+
+- **Executable:** your Python 3 executable's absolute path.
+- **Arguments:** the absolute path to `server_ips.py`, your inventory URL, and
+  optionally `--merge`, with each argument on a separate line.
+
+For example, the arguments could be:
+
+```text
+/Users/you/bin/server_ips.py
+https://inventory.example.com/servers.json
+--merge
+```
+
+Click **Save Command**, then connect. The initial fixed AllowedIPs must reach the
+inventory service, including its DNS server if needed. Cached inventory is applied
+before fetching a fresh list; **Refresh Now** repeats the command while connected.
+The saved `.conf` stays the source of the static prefixes and is not rewritten.
+Live AllowedIPs, extra routes, and the last successful inventory are updated
+together. A failed command keeps the last good inventory and reports an error.
+
+Static and cached destinations are blocked outside their designated VPN by PF,
+including during refresh, disconnect, and app quit. Protection remains installed
+until **Disable and Remove Protection** is selected while disconnected. The helper
+restores blocked policies when it starts at system boot. This is not a pre-boot
+firewall: there can be a boot interval before the helper starts. Addresses never
+seen before cannot be blocked in advance unless covered by a static prefix.
+Encrypted UDP traffic to the VPN endpoint is permitted so it can reconnect.
+
+Use the standard macOS `com.apple/*` PF filter anchor. A missing anchor is an error;
+WireTunnels does not replace the system firewall configuration. Custom firewall
+rules or another administrator changing PF can interfere with protection. Inventory
+commands currently support personal, single-peer tunnels, without bypass routes or
+hop chains. Different inventory tunnels must have disjoint protected destinations.
+The updated app requires its matching updated helper.
+
+Commands execute directly with an argument array, without an implicit shell. Output
+must be nonempty IPs/CIDRs separated by whitespace or commas. Every entry is checked
+before application. Limits are 60 seconds, 8 MiB of stdout, and 100,000 entries.
+Disconnect cancels an in-progress fetch. The helper rejects results from an older
+connection generation and never runs the inventory command itself.
+
+## Python example
 
 `server_ips.py` uses Python 3's standard library to turn a JSON server inventory
 into IP addresses or exact CIDR ranges suitable for preparing `AllowedIPs`.
@@ -38,11 +87,17 @@ The script validates the entire inventory before writing output. Missing fields,
 invalid or scoped addresses, empty inventories and fetch failures produce an error
 on stderr and exit status 1. Network operations use a 30-second socket timeout.
 Automation should check the exit status and retain its last good inventory on
-failure. Updating a running tunnel and enforcing routing policy are separate
-integration work.
+failure; the app integration above does this automatically.
 
 Run the regression tests from the repository root:
 
 ```sh
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s Tests -p 'test_server_ips.py' -v
+bash Tests/test_inventory_routing.sh
 ```
+
+The Swift tests use injected networking operations and do not change the host's
+firewall, routes, or VPN connections. A signed app/helper test on a disposable Mac
+is still needed to verify live PF, WireGuard, and reconnect behavior. The current
+upstream `main` also needs the missing bundled-tool build scripts supplied by PR #8
+before a normal complete app build can run.

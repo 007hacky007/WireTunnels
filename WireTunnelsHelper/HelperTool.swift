@@ -4,7 +4,7 @@ import Foundation
 import Security
 
 private let helperVersionNumber = "1.0.6"
-private let helperProtocolRevisionValue = "split-dns-v1"
+private let helperProtocolRevisionValue = "inventory-routing-v1"
 private let applicationIdentifier = "com.fmdigitech.WireTunnels"
 private let applicationTeamIdentifier = "48W4Z4X56T"
 private let systemRoot = URL(fileURLWithPath: "/Library/Application Support/WireTunnels")
@@ -491,6 +491,9 @@ final class HelperTool: NSObject, NSXPCListenerDelegate {
     }
 
     func run() {
+        let bootstrap = HelperSession(clientBundleURL: Bundle.main.bundleURL, clientUser: ClientUser(uid: 0, username: "root"))
+        do { try bootstrap.restoreInventoryProtection() }
+        catch { NSLog("Inventory protection could not be restored: %@", error.localizedDescription) }
         listener.resume()
         RunLoop.main.run()
     }
@@ -513,6 +516,87 @@ private final class HelperSession: NSObject, WireguardHelperProtocol {
     private let clientBundleURL: URL
     private let clientUser: ClientUser
     private let fileManager = FileManager.default
+
+    private lazy var inventoryService = InventoryRoutingService(
+        file: systemRoot.appendingPathComponent("inventory/policies.json"),
+        run: { [unowned self] executable, arguments, input in
+            let result = self.runCommand(executable: executable, arguments: arguments, standardInput: input)
+            guard result.exitCode == 0 || (arguments == ["-e"] && result.stderr.contains("already enabled")) else {
+                throw InventoryError.operation("Inventory networking command failed: \(executable.lastPathComponent)")
+            }
+            return result.stdout
+        },
+        resolve: { [unowned self] request in try self.inventoryInterface(request) },
+        updatePeer: { [unowned self] interface, peer, prefixes in
+            let wg = try self.verifiedInstalledWg()
+            let result = self.runCommand(executable: wg, arguments: ["addconf", interface, "/dev/stdin"],
+                standardInput: "[Peer]\nPublicKey = \(peer)\nAllowedIPs = \(prefixes.joined(separator: ","))\n")
+            guard result.exitCode == 0 else { throw InventoryError.operation("Unable to update WireGuard AllowedIPs") }
+        },
+        route: { add, prefix, interface in
+            let socket = try InventoryRouteSocket()
+            if add { try socket.add(prefix, interface: interface) }
+            else { try socket.remove(prefix, interface: interface) }
+        }
+    )
+
+    func restoreInventoryProtection() throws { try inventoryService.restoreProtection() }
+
+    func updateInventoryRouting(request data: Data, reply: @escaping (Bool, String?) -> Void) {
+        guard data.count <= 8 * 1024 * 1024 else { reply(false, "Inventory request is too large"); return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let request = try JSONDecoder().decode(InventoryRoutingRequest.self, from: data)
+                try self.inventoryService.perform(request, uid: uid_t(self.clientUser.uid))
+                reply(true, nil)
+            } catch { reply(false, error.localizedDescription) }
+        }
+    }
+
+    private func inventoryInterface(_ request: InventoryRoutingRequest) throws -> InventoryLiveInterface {
+        guard let config = validatedRuntimeConfig(named: request.configName, allowLegacy: false) else { throw InventoryError.staleOperation }
+        let metadata = try sanitizedMetadata(from: Data(contentsOf: config))
+        guard metadata.localPublicKey == request.localPublicKey, metadata.publicKey == request.peerPublicKey else {
+            throw InventoryError.staleOperation
+        }
+        func transport(_ endpoint: String, interface: String) throws -> InventoryLiveInterface {
+            guard let colon = endpoint.lastIndex(of: ":"),
+                  let port = Int(endpoint[endpoint.index(after: colon)...]), (1...65535).contains(port) else {
+                throw InventoryError.staleOperation
+            }
+            let host = String(endpoint[..<colon]).trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+            var hints = addrinfo(), result: UnsafeMutablePointer<addrinfo>?
+            hints.ai_family = AF_UNSPEC; hints.ai_socktype = SOCK_DGRAM
+            guard getaddrinfo(host, nil, &hints, &result) == 0, let first = result else { throw InventoryError.staleOperation }
+            defer { freeaddrinfo(result) }
+            var buffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            guard getnameinfo(first.pointee.ai_addr, first.pointee.ai_addrlen, &buffer, socklen_t(buffer.count), nil, 0, NI_NUMERICHOST) == 0 else {
+                throw InventoryError.staleOperation
+            }
+            let literal = String(cString: buffer)
+            guard Self.isValidIPLiteral(literal) else { throw InventoryError.staleOperation }
+            return InventoryLiveInterface(name: interface, endpointHost: literal, endpointPort: port)
+        }
+        let alias = URL(fileURLWithPath: "/var/run/wireguard").appendingPathComponent(
+            config.deletingPathExtension().lastPathComponent + ".name")
+        if !fileManager.fileExists(atPath: alias.path), let endpoint = metadata.endpoint {
+            return try transport(endpoint, interface: "")
+        }
+        try validateRegularFile(alias, expectedSize: nil)
+        try validateRootOwnedFile(alias)
+        let interface = try String(contentsOf: alias, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard Self.isValidInterfaceName(interface) else { throw InventoryError.staleOperation }
+        let wg = try verifiedInstalledWg()
+        let key = runCommand(executable: wg, arguments: ["show", interface, "public-key"])
+        guard key.exitCode == 0, key.stdout.trimmingCharacters(in: .whitespacesAndNewlines) == request.localPublicKey else {
+            throw InventoryError.staleOperation
+        }
+        let endpoints = runCommand(executable: wg, arguments: ["show", interface, "endpoints"])
+        guard endpoints.exitCode == 0,
+              let line = endpoints.stdout.split(separator: "\n").first(where: { $0.hasPrefix(request.peerPublicKey + "\t") }),
+              let endpoint = line.split(separator: "\t").last else { throw InventoryError.staleOperation }
+        return try transport(String(endpoint), interface: interface)
+    }
 
     init(clientBundleURL: URL, clientUser: ClientUser) {
         self.clientBundleURL = clientBundleURL

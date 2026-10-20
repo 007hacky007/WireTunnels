@@ -30,7 +30,7 @@ struct RouteEntry: Codable, Equatable {
 final class WireGuardCommandService {
     nonisolated static let helperMachServiceName = "com.fmdigitech.WireTunnels.helper"
     nonisolated static let expectedHelperVersion = "1.0.6"
-    nonisolated static let expectedHelperProtocolRevision = "split-dns-v1"
+    nonisolated static let expectedHelperProtocolRevision = "inventory-routing-v1"
     private static let helperCheckTimeoutNanoseconds: UInt64 = 3_000_000_000
     private static let keyGenerationTimeoutNanoseconds: UInt64 = 10_000_000_000
     private static let operationTimeoutNanoseconds: UInt64 = 30_000_000_000
@@ -428,6 +428,15 @@ final class WireGuardCommandService {
                 } else {
                     complete(.failure(CommandError.statusFailed(errorMessage ?? "Unknown")))
                 }
+            }
+        }
+    }
+
+    func updateInventoryRouting(_ request: InventoryRoutingRequest) async throws {
+        let data = try JSONEncoder().encode(request)
+        try await performHelperOperation(timeoutDescription: "Updating inventory AllowedIPs and routes") { helper, complete in
+            helper.updateInventoryRouting(request: data) { success, message in
+                complete(success ? .success(()) : .failure(InventoryError.operation(message ?? "Inventory routing failed")))
             }
         }
     }

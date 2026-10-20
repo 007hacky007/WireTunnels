@@ -21,8 +21,12 @@ final class TunnelRepository {
     }
 
     func save(_ tunnels: [Tunnel]) {
-        guard let data = try? encoder.encode(tunnels) else { return }
-        try? data.write(to: AppPaths.metadataFile, options: .atomic)
+        try? saveChecked(tunnels)
+    }
+
+    func saveChecked(_ tunnels: [Tunnel]) throws {
+        try encoder.encode(tunnels).write(to: AppPaths.metadataFile, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: AppPaths.metadataFile.path)
     }
 
     private func createDirectoriesIfNeeded() {

@@ -76,6 +76,9 @@ struct Tunnel: Identifiable, Codable, Equatable, Hashable {
     var publicKey: String?
     var localPublicKey: String?  // public key derived from this client's own [Interface] PrivateKey
     var speedTestURL: String?   // user-supplied HTTPS URL for the optional throughput probe — never a built-in default
+    var inventoryCommand: InventoryCommand?
+    var inventoryAllowedIPs: [String] = []
+    var inventoryUpdatedAt: Date?
     var lastHandshake: Date?
     var rxBytes: Int64
     var txBytes: Int64
@@ -105,6 +108,7 @@ struct Tunnel: Identifiable, Codable, Equatable, Hashable {
         case publicKey
         case localPublicKey
         case speedTestURL
+        case inventoryCommand, inventoryAllowedIPs, inventoryUpdatedAt
         case lastHandshake
         case rxBytes
         case txBytes
@@ -167,6 +171,9 @@ struct Tunnel: Identifiable, Codable, Equatable, Hashable {
         publicKey = try container.decodeIfPresent(String.self, forKey: .publicKey)
         localPublicKey = try container.decodeIfPresent(String.self, forKey: .localPublicKey)
         speedTestURL = try container.decodeIfPresent(String.self, forKey: .speedTestURL)
+        inventoryCommand = try container.decodeIfPresent(InventoryCommand.self, forKey: .inventoryCommand)
+        inventoryAllowedIPs = try container.decodeIfPresent([String].self, forKey: .inventoryAllowedIPs) ?? []
+        inventoryUpdatedAt = try container.decodeIfPresent(Date.self, forKey: .inventoryUpdatedAt)
         lastHandshake = try container.decodeIfPresent(Date.self, forKey: .lastHandshake)
         rxBytes = try container.decode(Int64.self, forKey: .rxBytes)
         txBytes = try container.decode(Int64.self, forKey: .txBytes)
