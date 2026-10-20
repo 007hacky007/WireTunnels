@@ -32,7 +32,10 @@ until **Disable and Remove Protection** is selected while disconnected. The help
 restores blocked policies when it starts at system boot. This is not a pre-boot
 firewall: there can be a boot interval before the helper starts. Addresses never
 seen before cannot be blocked in advance unless covered by a static prefix.
-Encrypted UDP traffic to the VPN endpoint is permitted so it can reconnect.
+Only root-owned UDP traffic to the VPN endpoint is exempt, so the helper's
+WireGuard transport can reconnect without allowing ordinary apps to bypass it.
+The helper watches interface changes even after the app quits. A missing interface,
+changed WireGuard identity, or reused interface name closes the VPN exception.
 
 Use the standard macOS `com.apple/*` PF filter anchor. A missing anchor is an error;
 WireTunnels does not replace the system firewall configuration. Custom firewall
@@ -41,9 +44,34 @@ commands currently support personal, single-peer tunnels, without bypass routes 
 hop chains. Different inventory tunnels must have disjoint protected destinations.
 The updated app requires its matching updated helper.
 
+Both PF anchors sit directly under the standard `com.apple/*` wildcard, which
+evaluates them in name order: `com.apple/wiretunnels.inventory`, then
+`com.apple/wiretunnels.killswitch`. Inventory uses quick blocks on the wrong
+interface; its verified VPN path falls through to the kill switch. It never uses
+a quick VPN pass, so another tunnel's pass cannot override an inventory block,
+and inventory cannot bypass the kill switch's choice of VPN. Endpoint exceptions
+are root-only and create no PF state. Kill-switch synchronization clears its old
+anchor after loading the replacement. Earlier custom quick passes in the root
+ruleset can still bypass these anchors and are outside the supported setup.
+
+The helper starts at boot (`RunAtLoad`) to restore saved blocks and watch interface
+changes without waiting for the app. Restoring only on the next app launch would
+leave cached destinations unprotected until then. With no policies, it installs
+no inventory rules. The helper protocol revision is `inventory-routing-v2`; app
+and helper must ship together, with helper approval coordinated for the release.
+
+Settings saves, connect, disconnect, and wake reconnect cannot modify the same
+tunnel at once. A busy disconnect now reports an error and can be retried after
+the operation finishes; an inventory fetch itself can be cancelled immediately.
+Reset removes root-owned inventory policies before deleting local metadata. It
+stops if that removal fails, preserving the tunnel IDs needed to remove protection.
+
 Commands execute directly with an argument array, without an implicit shell. Output
 must be nonempty IPs/CIDRs separated by whitespace or commas. Every entry is checked
 before application. Limits are 60 seconds, 8 MiB of stdout, and 100,000 entries.
+Discovered IPv4 prefixes must be /8 or longer; IPv6 prefixes must be /32 or longer.
+Unspecified, loopback, link-local, multicast, and IPv4-mapped IPv6 ranges are
+rejected. These limits apply to discovered output; static AllowedIPs stay explicit.
 Disconnect cancels an in-progress fetch. The helper rejects results from an older
 connection generation and never runs the inventory command itself.
 
@@ -96,8 +124,12 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s Tests -p 'test_server_
 bash Tests/test_inventory_routing.sh
 ```
 
-The Swift tests use injected networking operations and do not change the host's
-firewall, routes, or VPN connections. A signed app/helper test on a disposable Mac
+The Swift tests run the real tunnel manager against a fake XPC helper, including
+connect, disconnect, wake, delayed settings replies, and missing configuration.
+Helper tests inject PF, WireGuard and route operations and cover rollback, interface
+reuse, exact route ownership, state cleanup, anchor ordering and 10,000 addresses.
+They do not change the host's firewall, routes, or VPN connections. A signed
+app/helper test on a disposable Mac
 is still needed to verify live PF, WireGuard, and reconnect behavior. The current
 upstream `main` also needs the missing bundled-tool build scripts supplied by PR #8
 before a normal complete app build can run.

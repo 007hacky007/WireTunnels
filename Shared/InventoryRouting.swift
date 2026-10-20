@@ -16,6 +16,12 @@ nonisolated struct InventoryRoutingRequest: Codable {
     var peerPublicKey: String
     var staticPrefixes: [String]
     var discoveredPrefixes: [String]
+    var useCachedInventory: Bool? = nil
+
+    static func removal(ownerID: UUID) -> Self {
+        Self(action: .remove, ownerID: ownerID, generation: UUID(), configName: "",
+             localPublicKey: "", peerPublicKey: "", staticPrefixes: [], discoveredPrefixes: [])
+    }
 }
 
 nonisolated struct IPPrefix: Hashable, Comparable {
@@ -64,9 +70,23 @@ nonisolated struct IPPrefix: Hashable, Comparable {
         return lhs.length < rhs.length
     }
 
-    static func normalized(_ values: [String]) throws -> [String] {
-        guard values.count <= 100_000 else { throw InventoryError.invalidOutput }
+    static func normalized(_ values: [String], maximum: Int = 100_000) throws -> [String] {
+        guard values.count <= maximum else { throw InventoryError.invalidOutput }
         return try Set(values.map(Self.init)).sorted().map(\.string)
+    }
+
+    static func inventoryPrefixes(_ values: [String]) throws -> [String] {
+        let prefixes = try normalized(values)
+        let forbidden = try ["0.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "224.0.0.0/4",
+                             "::/96", "::ffff:0:0/96", "fe80::/10", "ff00::/8"].map(Self.init)
+        for value in prefixes {
+            let prefix = try Self(value)
+            guard prefix.length >= (prefix.family == AF_INET ? 8 : 32),
+                  !forbidden.contains(where: { $0.contains(prefix) || prefix.contains($0) }) else {
+                throw InventoryError.operation("Inventory prefixes must be at least /8 for IPv4 or /32 for IPv6 and cannot include unspecified, loopback, link-local, or multicast addresses")
+            }
+        }
+        return prefixes
     }
 
     static func parseOutput(_ data: Data) throws -> [String] {
@@ -75,7 +95,38 @@ nonisolated struct IPPrefix: Hashable, Comparable {
         }
         let values = text.split { $0.isWhitespace || $0 == "," }.map(String.init)
         guard !values.isEmpty else { throw InventoryError.invalidOutput }
-        return try normalized(values)
+        return try inventoryPrefixes(values)
+    }
+}
+
+/// Sorted, disjoint ranges make coverage and overlap checks logarithmic.
+nonisolated struct IPPrefixIndex {
+    private let ranges: [IPPrefix]
+
+    init(_ values: [IPPrefix]) {
+        var compact: [IPPrefix] = []
+        for prefix in values.sorted() where compact.last?.contains(prefix) != true { compact.append(prefix) }
+        ranges = compact
+    }
+
+    private func insertionPoint(_ prefix: IPPrefix) -> Int {
+        var low = 0, high = ranges.count
+        while low < high {
+            let middle = (low + high) / 2
+            if ranges[middle] <= prefix { low = middle + 1 } else { high = middle }
+        }
+        return low
+    }
+
+    func contains(_ prefix: IPPrefix) -> Bool {
+        let i = insertionPoint(prefix)
+        return i > 0 && ranges[i - 1].contains(prefix)
+    }
+
+    func overlaps(_ prefix: IPPrefix) -> Bool {
+        let i = insertionPoint(prefix)
+        return (i > 0 && (ranges[i - 1].contains(prefix) || prefix.contains(ranges[i - 1])))
+            || (i < ranges.count && prefix.contains(ranges[i]))
     }
 }
 

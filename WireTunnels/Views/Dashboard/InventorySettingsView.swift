@@ -26,7 +26,7 @@ struct InventorySettingsView: View {
                 Button("Save Command") { save(disable: false) }
                     .disabled(saving || live.isActive || executable.isEmpty)
                 Button("Disable and Remove Protection") { save(disable: true) }
-                    .disabled(saving || live.isActive || live.inventoryCommand == nil)
+                    .disabled(saving || live.isActive)
                 Button("Refresh Now") { Task { await tunnelManager.refreshInventory(for: live) } }
                     .disabled(!live.isActive || live.inventoryCommand == nil || tunnelManager.refreshingInventories.contains(live.id))
                 if saving || tunnelManager.refreshingInventories.contains(live.id) { ProgressView().controlSize(.small) }

@@ -3,6 +3,7 @@ import Foundation
 extension TunnelManager {
     private func inventoryRequest(_ tunnel: Tunnel, action: InventoryRoutingRequest.Action,
                                   discovered: [String]? = nil) throws -> InventoryRoutingRequest {
+        if action == .remove { return .removal(ownerID: tunnel.id) }
         let parsed = try WireGuardConfigParser().parse(contentsOf: URL(fileURLWithPath: tunnel.configPath))
         guard parsed.isValid, !parsed.warnings.contains(.multiplePeers), let peer = parsed.peerPublicKey,
               let local = parsed.privateKey.flatMap(WireGuardKey.publicKey(fromPrivateKey:)),
@@ -26,11 +27,16 @@ extension TunnelManager {
                 throw InventoryError.operation("Choose an executable using an absolute path. Inventory protection cannot be combined with bypass routes or hop chains.")
             }
         }
+        connectingTunnels.insert(tunnel.id)
+        defer { connectingTunnels.remove(tunnel.id) }
         inventoryGenerations[tunnel.id] = UUID()
         let previous = tunnels[index]
         let request = try inventoryRequest(tunnels[index], action: command == nil ? .remove : .protect)
         try await commandService.updateInventoryRouting(request)
-        guard let index = tunnels.firstIndex(where: { $0.id == tunnel.id }) else { throw InventoryError.staleOperation }
+        guard let index = tunnels.firstIndex(where: { $0.id == tunnel.id }), !tunnels[index].isActive else {
+            try? await commandService.updateInventoryRouting(.removal(ownerID: tunnel.id))
+            throw InventoryError.staleOperation
+        }
         tunnels[index].inventoryCommand = command
         if command == nil { tunnels[index].inventoryAllowedIPs = []; tunnels[index].inventoryUpdatedAt = nil }
         tunnels[index].updatedAt = Date()
@@ -55,7 +61,9 @@ extension TunnelManager {
 
     func applyCachedInventory(_ tunnel: Tunnel) async throws {
         let current = tunnels.first(where: { $0.id == tunnel.id }) ?? tunnel
-        try await commandService.updateInventoryRouting(inventoryRequest(current, action: .apply))
+        var request = try inventoryRequest(current, action: .apply)
+        request.useCachedInventory = true
+        try await commandService.updateInventoryRouting(request)
     }
 
     func refreshInventory(for tunnel: Tunnel) async {

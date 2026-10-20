@@ -29,15 +29,15 @@ final class TunnelManager: ObservableObject {
     private var trafficSnapshots: [UUID: (rx: Int64, tx: Int64, time: Date)] = [:]
     private let maxTrafficSamples = 20
 
-    let commandService = WireGuardCommandService()
-    let networkMonitor = NetworkMonitorService()
-    private let repository = TunnelRepository()
+    let commandService: WireGuardCommandService
+    let networkMonitor: NetworkMonitorService
+    private let repository: TunnelRepository
     private let hopChainRepository = HopChainRepository()
-    private let configStorage = ConfigStorageService()
+    private let configStorage: ConfigStorageService
     private let parser = WireGuardConfigParser()
     private let toolLocator = WireGuardToolLocator()
-    private let log = LogService.shared
-    private let notificationService = NotificationService.shared
+    private let log: LogService
+    private let notificationService: NotificationService
     private let resetService = AppDataResetService.shared
     private lazy var statusMonitor = StatusMonitorService(commandService: commandService)
     private var pollingTask: Task<Void, Never>?
@@ -71,11 +71,21 @@ final class TunnelManager: ObservableObject {
 
     // MARK: - Initialization
 
-    init() {
+    init(commandService: WireGuardCommandService? = nil, networkMonitor: NetworkMonitorService? = nil,
+         repository: TunnelRepository? = nil, configStorage: ConfigStorageService? = nil,
+         log: LogService? = nil, notificationService: NotificationService? = nil,
+         automaticallyInitialize: Bool = true) {
+        self.commandService = commandService ?? WireGuardCommandService()
+        self.networkMonitor = networkMonitor ?? NetworkMonitorService()
+        self.repository = repository ?? TunnelRepository()
+        self.configStorage = configStorage ?? ConfigStorageService()
+        self.log = log ?? .shared
+        self.notificationService = notificationService ?? .shared
+        guard automaticallyInitialize else { return }
         // Relay networkMonitor changes so views observing TunnelManager redraw on network state changes
-        networkCancellable = networkMonitor.objectWillChange
+        networkCancellable = self.networkMonitor.objectWillChange
             .sink { [weak self] in self?.objectWillChange.send() }
-        networkMonitor.onNetworkChange = { [weak self] in
+        self.networkMonitor.onNetworkChange = { [weak self] in
             // Debounce: NWPathMonitor fires multiple times per real network change
             // (e.g. wireguard-go creating a utun triggers another path update).
             // Wait 500 ms before acting so only the final stable state matters.
@@ -86,10 +96,10 @@ final class TunnelManager: ObservableObject {
                 await self?.handleNetworkChange()
             }
         }
-        networkMonitor.onSystemWake = { [weak self] in
+        self.networkMonitor.onSystemWake = { [weak self] in
             await self?.handleSystemWake()
         }
-        networkMonitor.onLocalAddressChange = { [weak self] in
+        self.networkMonitor.onLocalAddressChange = { [weak self] in
             // Same debounce reasoning as onNetworkChange above — coalesce the
             // handful of path updates a single DHCP renewal tends to produce.
             self?.localAddressChangeDebounceTask?.cancel()
@@ -607,7 +617,10 @@ final class TunnelManager: ObservableObject {
     func disconnectTunnel(_ tunnel: Tunnel, isAutoDisconnect: Bool = false) async {
         guard let index = tunnels.firstIndex(where: { $0.id == tunnel.id }) else { return }
         let liveTunnel = tunnels[index]
-        guard !connectingTunnels.contains(liveTunnel.id) else { return }
+        guard !connectingTunnels.contains(liveTunnel.id) else {
+            errorMessage = "Wait for the current tunnel operation to finish before disconnecting."
+            return
+        }
         connectingTunnels.insert(liveTunnel.id)
         defer { connectingTunnels.remove(liveTunnel.id) }
         if let chain = activeOrBusyChain(containing: liveTunnel.id), !connectingChains.contains(chain.id) {
@@ -710,6 +723,7 @@ final class TunnelManager: ObservableObject {
     }
 
     func makeTunnelShared(_ tunnel: Tunnel) async throws {
+        guard !connectingTunnels.contains(tunnel.id) else { throw InventoryError.staleOperation }
         guard let liveTunnel = tunnels.first(where: { $0.id == tunnel.id }),
               liveTunnel.scope == .personal else { return }
         guard !liveTunnel.isActive else {
@@ -751,6 +765,7 @@ final class TunnelManager: ObservableObject {
     }
 
     func updateTunnel(_ tunnel: Tunnel, name: String, configContent: String) async throws {
+        guard !connectingTunnels.contains(tunnel.id) else { throw InventoryError.staleOperation }
         guard let index = tunnels.firstIndex(where: { $0.id == tunnel.id }) else { return }
         let liveTunnel = tunnels[index]
         guard liveTunnel.inventoryCommand == nil else {
@@ -805,6 +820,10 @@ final class TunnelManager: ObservableObject {
     func deleteTunnel(_ tunnel: Tunnel) {
         guard let liveTunnel = tunnels.first(where: { $0.id == tunnel.id }) else { return }
         guard liveTunnel.scope == .personal else { return }
+        guard !connectingTunnels.contains(tunnel.id) else {
+            errorMessage = "Wait for this tunnel's current operation before deleting it."
+            return
+        }
         guard liveTunnel.inventoryCommand == nil else {
             errorMessage = "Disable inventory protection before deleting this tunnel."
             return
@@ -1540,6 +1559,10 @@ final class TunnelManager: ObservableObject {
     /// Sets the tunnel's excluded-CIDR list and, if it's currently connected,
     /// immediately re-syncs the privileged routes to match.
     func updateExcludedRoutes(for tunnel: Tunnel, routes: [String]) {
+        guard !connectingTunnels.contains(tunnel.id) else {
+            errorMessage = "Wait for the tunnel operation to finish before changing bypass routes."
+            return
+        }
         guard let index = tunnels.firstIndex(where: { $0.id == tunnel.id }) else { return }
         guard tunnels[index].scope == .personal else { return }
         guard tunnels[index].inventoryCommand == nil || routes.isEmpty else {
@@ -1642,6 +1665,10 @@ final class TunnelManager: ObservableObject {
     }
 
     func addHopChain(hopTunnelID: UUID, exitTunnelID: UUID) {
+        guard !connectingTunnels.contains(hopTunnelID), !connectingTunnels.contains(exitTunnelID) else {
+            errorMessage = "Wait for the tunnel operations to finish before adding a hop chain."
+            return
+        }
         guard hopTunnelID != exitTunnelID else { return }
         guard !tunnels.contains(where: { ($0.id == hopTunnelID || $0.id == exitTunnelID) && $0.inventoryCommand != nil }) else {
             errorMessage = "Inventory protection cannot be combined with hop chains."

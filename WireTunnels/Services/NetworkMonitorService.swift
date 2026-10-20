@@ -46,8 +46,9 @@ final class NetworkMonitorService: NSObject, ObservableObject {
     // prevents immediate reconnect until the matching network is lost and rejoined.
     private var suppressedIDs: Set<UUID>     = []
 
-    override init() {
+    init(startMonitoring: Bool = true) {
         super.init()
+        guard startMonitoring else { return }
         locationManager.delegate = self
         updateWiFiNamePermission()
 

@@ -5,6 +5,7 @@ struct InventoryLiveInterface {
     var name: String
     var endpointHost: String
     var endpointPort: Int
+    var index: UInt32 = 0
 }
 
 final class InventoryRoutingService {
@@ -13,103 +14,165 @@ final class InventoryRoutingService {
         var uid: uid_t
         var interface: String?
         var ownedRoutes: [String] = []
+        var interfaceIndex: UInt32?
+        var pendingPrefixes: [String]?
     }
     typealias Run = (URL, [String], String?) throws -> String
     private let file: URL
     private let run: Run
     private let resolve: (InventoryRoutingRequest) throws -> InventoryLiveInterface
-    private let updatePeer: (String, String, [String]) throws -> Void
-    private let route: (Bool, IPPrefix, String) throws -> Void
+    private let updatePeer: (InventoryLiveInterface, String, [String]) throws -> Void
+    private let route: (Bool, IPPrefix, InventoryLiveInterface) throws -> Void
     private let expectedUID: uid_t
+    private let localAddresses: () -> Set<String>
     private static let lock = NSRecursiveLock()
     static let anchor = "com.apple/wiretunnels.inventory"
+    static let killSwitchAnchor = "com.apple/wiretunnels.killswitch"
 
-    init(file: URL, expectedUID: uid_t = 0, run: @escaping Run,
+    init(file: URL, expectedUID: uid_t = 0, localAddresses: @escaping () -> Set<String> = InventoryRoutingService.interfaceAddresses, run: @escaping Run,
          resolve: @escaping (InventoryRoutingRequest) throws -> InventoryLiveInterface,
-         updatePeer: @escaping (String, String, [String]) throws -> Void,
-         route: @escaping (Bool, IPPrefix, String) throws -> Void) {
-        self.file = file; self.expectedUID = expectedUID; self.run = run
+         updatePeer: @escaping (InventoryLiveInterface, String, [String]) throws -> Void,
+         route: @escaping (Bool, IPPrefix, InventoryLiveInterface) throws -> Void) {
+        self.file = file; self.expectedUID = expectedUID; self.localAddresses = localAddresses; self.run = run
         self.resolve = resolve; self.updatePeer = updatePeer; self.route = route
     }
 
     func perform(_ input: InventoryRoutingRequest, uid: uid_t) throws {
         Self.lock.lock(); defer { Self.lock.unlock() }
+        var records = try load()
+        let old = records.first { $0.request.ownerID == input.ownerID }
+        guard old == nil || old?.uid == uid else { throw InventoryError.operation("Inventory policy belongs to another user") }
+        let others = records.filter { $0.request.ownerID != input.ownerID }
+        if input.action == .remove {
+            do {
+                if let old, let live = matchingInterface(old) {
+                    for value in old.ownedRoutes { try route(false, IPPrefix(value), live) }
+                }
+                try installGuard(others)
+                try save(others)
+            } catch {
+                try? save(records)
+                try? installGuard(records)
+                throw error
+            }
+            return
+        }
         var request = input
         guard request.configName.range(of: "^[A-Za-z0-9_=+.-]{1,15}\\.conf$", options: .regularExpression) != nil,
               !request.configName.contains(".."),
               Data(base64Encoded: request.peerPublicKey)?.count == 32,
               Data(base64Encoded: request.localPublicKey)?.count == 32 else { throw InventoryError.invalidOutput }
         request.staticPrefixes = try IPPrefix.normalized(request.staticPrefixes)
-        request.discoveredPrefixes = try IPPrefix.normalized(request.discoveredPrefixes)
+        request.discoveredPrefixes = try IPPrefix.inventoryPrefixes(request.discoveredPrefixes)
         guard !request.staticPrefixes.isEmpty else { throw InventoryError.invalidOutput }
-        var records = try load()
-        let old = records.first { $0.request.ownerID == request.ownerID }
-        guard old == nil || old?.uid == uid else { throw InventoryError.operation("Inventory policy belongs to another user") }
         if request.action == .apply {
             guard old?.request.generation == request.generation else { throw InventoryError.staleOperation }
         }
-        if request.action == .protect, request.discoveredPrefixes.isEmpty, let old {
+        if request.action == .protect || request.useCachedInventory == true, let old {
             request.discoveredPrefixes = old.request.discoveredPrefixes
         }
-        if request.action != .remove {
-            let protected = try (request.staticPrefixes + request.discoveredPrefixes).map(IPPrefix.init)
-            for other in records where other.request.ownerID != request.ownerID {
-                let otherPrefixes = try (other.request.staticPrefixes + other.request.discoveredPrefixes).map(IPPrefix.init)
-                guard !protected.contains(where: { prefix in otherPrefixes.contains { prefix.contains($0) || $0.contains(prefix) } }) else {
-                    throw InventoryError.operation("Inventory-protected destinations cannot overlap another inventory tunnel")
-                }
+        let effective = try IPPrefix.normalized(request.staticPrefixes + request.discoveredPrefixes)
+        let protected = try effective.map(IPPrefix.init)
+        for other in others {
+            let prefixes = IPPrefixIndex(try guardedPrefixes(other).map(IPPrefix.init))
+            guard !protected.contains(where: prefixes.overlaps) else {
+                throw InventoryError.operation("Inventory-protected destinations cannot overlap another inventory tunnel")
             }
         }
         var record = Record(request: request, uid: uid)
-        if let old { record.ownedRoutes = old.ownedRoutes; record.interface = old.interface }
-        records.removeAll { $0.request.ownerID == request.ownerID }
-        if request.action == .remove {
-            if let old, let interface = old.interface, (try? resolve(old.request))?.name == interface {
-                for value in old.ownedRoutes { try route(false, IPPrefix(value), interface) }
-            }
-            try installGuard(records)
-            try save(records)
-            return
+        if let old {
+            record.interface = old.interface; record.interfaceIndex = old.interfaceIndex
+            record.ownedRoutes = old.ownedRoutes; record.pendingPrefixes = old.pendingPrefixes
         }
-        // First close the physical path. An apply failure leaves these rules in place.
-        record.request.action = .protect
-        let blocked = records + [record]
-        try save(blocked)
-        try installGuard(blocked)
-        if let old, let interface = old.interface, (try? resolve(old.request))?.name == interface {
-            for value in old.ownedRoutes { try route(false, IPPrefix(value), interface) }
-        }
-        record.ownedRoutes = []
-        record.interface = nil
         if request.action == .protect {
-            try save(records + [record])
+            record.request.action = .protect
+            do {
+                try installGuard(others + [record], purge: effective)
+                try save(others + [record])
+            } catch {
+                // A failed first enable must not leave an orphan policy behind.
+                try? save(records)
+                try? installGuard(records)
+                throw error
+            }
+            if let old, let live = matchingInterface(old) {
+                for value in old.ownedRoutes { try route(false, IPPrefix(value), live) }
+            }
+            record.interface = nil; record.interfaceIndex = nil; record.ownedRoutes = []
+            try save(others + [record])
             return
         }
         let live = try resolve(request)
-        guard live.name.range(of: "^utun[0-9]+$", options: .regularExpression) != nil else {
+        guard live.name.range(of: "^utun[0-9]+$", options: .regularExpression) != nil, live.index > 0 else {
             throw InventoryError.staleOperation
         }
-        let effective = try IPPrefix.normalized(request.staticPrefixes + request.discoveredPrefixes)
-        try updatePeer(live.name, request.peerPublicKey, effective)
-        let staticPrefixes = try request.staticPrefixes.map(IPPrefix.init)
-        let additions = try request.discoveredPrefixes.map(IPPrefix.init).filter { prefix in
-            !staticPrefixes.contains { $0.contains(prefix) }
-        }
+        let previousLive = old.flatMap(matchingInterface)
+        let owned = previousLive?.name == live.name && previousLive?.index == live.index ? Set(old?.ownedRoutes ?? []) : []
+        let staticPrefixes = IPPrefixIndex(try request.staticPrefixes.map(IPPrefix.init))
+        let wanted = Set(try request.discoveredPrefixes.map(IPPrefix.init).filter { prefix in
+            !staticPrefixes.contains(prefix)
+        }.map(\.string))
+        if let old, old.request.action == .apply, previousLive?.index == live.index,
+           old.request.staticPrefixes == request.staticPrefixes, old.request.discoveredPrefixes == request.discoveredPrefixes,
+           old.pendingPrefixes?.isEmpty != false, wanted == owned { return }
+
+        var transition = old ?? record
+        transition.pendingPrefixes = effective
+        if previousLive == nil { transition.request.action = .protect }
+        // Keep the verified VPN path open and block every physical fallback.
+        let oldPrefixes = IPPrefixIndex(try (old.map(guardedPrefixes) ?? []).map(IPPrefix.init))
+        let newlyProtected = protected.filter { !oldPrefixes.contains($0) }.map(\.string)
+        var added: [String] = [], removed: [String] = []
+        var peerChanged = false
         do {
-            for prefix in additions {
-                try route(true, prefix, live.name)
-                record.ownedRoutes.append(prefix.string)
+            try installGuard(others + [transition], purge: newlyProtected)
+            for value in wanted.subtracting(owned).sorted() {
+                try route(true, IPPrefix(value), live)
+                added.append(value)
             }
-            record.interface = live.name
+            // An error can occur after WireGuard accepted part of the update.
+            peerChanged = true
+            try updatePeer(live, request.peerPublicKey, effective)
+            for value in owned.subtracting(wanted).sorted() {
+                try route(false, IPPrefix(value), live)
+                removed.append(value)
+            }
+            record.interface = live.name; record.interfaceIndex = live.index
+            record.ownedRoutes = wanted.sorted(); record.pendingPrefixes = nil
             record.request.action = .apply
-            try save(records + [record])
-            try installGuard(records + [record], endpoints: [request.ownerID: live])
+            try save(others + [record])
+            try installGuard(others + [record])
         } catch {
-            for value in record.ownedRoutes { try? route(false, IPPrefix(value), live.name) }
-            record.interface = nil; record.ownedRoutes = []
-            try? save(records + [record])
-            try? installGuard(records + [record])
-            throw error
+            let originalError = error
+            var rollbackFailed = false
+            for value in removed {
+                do { try route(true, IPPrefix(value), live) } catch { rollbackFailed = true }
+            }
+            if peerChanged, let old {
+                do { try updatePeer(live, old.request.peerPublicKey,
+                                   IPPrefix.normalized(old.request.staticPrefixes + old.request.discoveredPrefixes)) }
+                catch { rollbackFailed = true }
+            }
+            var retained = owned
+            for value in added {
+                do { try route(false, IPPrefix(value), live) }
+                catch { rollbackFailed = true; retained.insert(value) }
+            }
+            if rollbackFailed {
+                // Keep the last good cache, the pending block set, and ownership for cleanup.
+                transition.request.action = .protect
+                transition.interface = live.name; transition.interfaceIndex = live.index
+                transition.ownedRoutes = retained.union(removed).sorted()
+                records = others + [transition]
+            }
+            do { try save(records); try installGuard(records) }
+            catch {
+                transition.request.action = .protect
+                try? installGuard(others + [transition])
+                throw InventoryError.operation("Inventory update failed and recovery is incomplete; reconnect the tunnel before retrying")
+            }
+            if rollbackFailed { throw InventoryError.operation("Inventory update failed; destinations remain blocked until the tunnel reconnects") }
+            throw originalError
         }
     }
 
@@ -118,8 +181,34 @@ final class InventoryRoutingService {
         var records = try load()
         guard !records.isEmpty else { return }
         for i in records.indices { records[i].request.action = .protect }
+        try installGuard(records, purge: try records.flatMap(guardedPrefixes))
         try save(records)
-        try installGuard(records)
+    }
+
+    func reconcileInterfaces() throws {
+        Self.lock.lock(); defer { Self.lock.unlock() }
+        var records = try load()
+        var changed = false
+        for i in records.indices where records[i].request.action == .apply {
+            if matchingInterface(records[i]) == nil {
+                records[i].request.action = .protect
+                changed = true
+            }
+        }
+        if changed {
+            try installGuard(records)
+            try save(records)
+        }
+    }
+
+    private func matchingInterface(_ record: Record) -> InventoryLiveInterface? {
+        guard let name = record.interface, let live = try? resolve(record.request), live.name == name,
+              record.interfaceIndex == nil || record.interfaceIndex == live.index else { return nil }
+        return live
+    }
+
+    private func guardedPrefixes(_ record: Record) throws -> [String] {
+        try IPPrefix.normalized(record.request.staticPrefixes + record.request.discoveredPrefixes + (record.pendingPrefixes ?? []), maximum: 200_000)
     }
 
     private func load() throws -> [Record] {
@@ -146,48 +235,81 @@ final class InventoryRoutingService {
         try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
     }
 
-    private func installGuard(_ records: [Record], endpoints: [UUID: InventoryLiveInterface] = [:]) throws {
+    private func installGuard(_ records: [Record], purge: [String] = []) throws {
         let pf = URL(fileURLWithPath: "/sbin/pfctl")
         if records.isEmpty { _ = try run(pf, ["-a", Self.anchor, "-F", "all"], nil); return }
         let main = try run(pf, ["-sr"], nil)
         guard main.contains("anchor \"com.apple/*\"") else {
             throw InventoryError.operation("The active PF rules must include the standard com.apple/* anchor before inventory protection can be enabled")
         }
-        var lines: [String] = []
-        var allPrefixes: [IPPrefix] = []
+        var lines = ["pass quick on lo0 all"]
         for (index, record) in records.enumerated() {
-            let values = try IPPrefix.normalized(record.request.staticPrefixes + record.request.discoveredPrefixes)
-            allPrefixes += try values.map(IPPrefix.init)
+            let values = try guardedPrefixes(record)
             lines.append("table <inventory_\(index)> { \(values.joined(separator: ", ")) }")
         }
-        let liveInterfaces = records.map { endpoints[$0.request.ownerID] ?? (try? resolve($0.request)) }
+        let liveInterfaces = records.map { try? resolve($0.request) }
         for live in liveInterfaces.compactMap({ $0 }) {
-            // Permit the encrypted transport even if its endpoint is in a protected range.
-            lines.append("pass out quick proto udp to \(live.endpointHost) port \(live.endpointPort) no state")
+            // Only the helper's root-owned WireGuard transport may use this exception.
+            lines.append("pass out quick proto udp to \(live.endpointHost) port \(live.endpointPort) user root no state")
         }
         for (index, record) in records.enumerated() {
-            if let live = liveInterfaces[index], record.request.action == .apply, record.interface == live.name {
-                lines.append("pass out quick on \(live.name) to <inventory_\(index)> no state")
-            }
-            lines.append("block return out quick to <inventory_\(index)>")
+            let live = liveInterfaces[index]
+            let allowed = record.request.action == .apply && record.interface == live?.name && record.interfaceIndex == live?.index
+            let interface = allowed ? " on ! \(live!.name)" : ""
+            // No quick VPN pass: the later kill-switch anchor must still be evaluated.
+            lines.append("block drop out quick\(interface) to <inventory_\(index)>")
         }
         _ = try run(pf, ["-a", Self.anchor, "-f", "-"], lines.joined(separator: "\n") + "\n")
         _ = try run(pf, ["-e"], nil)
-        // Existing physical connections must not bypass a newly installed policy via PF state.
+        if !purge.isEmpty { try purgeStates(prefixes: purge) }
+    }
+
+    private func purgeStates(prefixes: [String]) throws {
+        let pf = URL(fileURLWithPath: "/sbin/pfctl")
+        let ranges = IPPrefixIndex(try prefixes.map(IPPrefix.init))
+        let local = localAddresses()
         let states = try run(pf, ["-ss"], nil)
-        var hosts = Set<String>()
-        for token in states.split(whereSeparator: \.isWhitespace) {
-            var value = String(token).trimmingCharacters(in: CharacterSet(charactersIn: "()"))
-            if value.hasPrefix("["), let end = value.firstIndex(of: "]") { value = String(value[value.index(after: value.startIndex)..<end]) }
-            else if let bracket = value.firstIndex(of: "[") { value = String(value[..<bracket]) }
-            if value.contains("."), let colon = value.lastIndex(of: ":") { value = String(value[..<colon]) }
-            if let address = try? IPPrefix(value), allPrefixes.contains(where: { $0.contains(address) }) {
-                hosts.insert(address.string.components(separatedBy: "/")[0])
+        var pairs = Set<[String]>()
+        for line in states.split(separator: "\n") {
+            let addresses = Set(line.split(whereSeparator: \.isWhitespace).compactMap(Self.stateAddress))
+            for host in addresses where !local.contains(host) {
+                guard let address = try? IPPrefix(host), ranges.contains(address) else { continue }
+                for other in addresses where other != host && other.contains(":") == host.contains(":") {
+                    pairs.insert([host, other]); pairs.insert([other, host])
+                }
             }
         }
-        for host in hosts {
-            _ = try run(pf, ["-k", host], nil)
-            _ = try run(pf, ["-k", host.contains(":") ? "::/0" : "0.0.0.0/0", "-k", host], nil)
+        for pair in pairs.sorted(by: { $0.lexicographicallyPrecedes($1) }) {
+            _ = try run(pf, ["-k", pair[0], "-k", pair[1]], nil)
         }
+    }
+
+    static func stateAddress(_ token: Substring) -> String? {
+        var value = String(token).trimmingCharacters(in: CharacterSet(charactersIn: "()"))
+        if value.hasPrefix("["), let end = value.firstIndex(of: "]") {
+            value = String(value[value.index(after: value.startIndex)..<end])
+        } else if let bracket = value.firstIndex(of: "[") { value = String(value[..<bracket]) }
+        if (try? IPPrefix(value)) == nil, value.contains("."), let colon = value.lastIndex(of: ":") {
+            value = String(value[..<colon])
+        }
+        guard let address = try? IPPrefix(value) else { return nil }
+        return address.string.components(separatedBy: "/")[0]
+    }
+
+    static func interfaceAddresses() -> Set<String> {
+        var first: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&first) == 0 else { return [] }
+        defer { freeifaddrs(first) }
+        var result = Set<String>(), current = first
+        while let entry = current {
+            defer { current = entry.pointee.ifa_next }
+            guard let address = entry.pointee.ifa_addr, [AF_INET, AF_INET6].contains(Int32(address.pointee.sa_family)) else { continue }
+            var buffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            if getnameinfo(address, socklen_t(address.pointee.sa_len), &buffer, socklen_t(buffer.count), nil, 0, NI_NUMERICHOST) == 0 {
+                let host = String(cString: buffer).components(separatedBy: "%")[0]
+                result.insert(host)
+            }
+        }
+        return result
     }
 }
