@@ -117,6 +117,18 @@ enum DebugControlTools {
             let tunnel = try find(args, manager)
             manager.updateSplitDNSDomains(for: tunnel, domains: domains, reconnect: args["reconnect"] as? Bool ?? false)
             return outcome(tunnel.id, manager)
+        case "set_inventory":
+            // Without "executable" the inventory command is removed.
+            let tunnel = try find(args, manager)
+            let command = (args["executable"] as? String).map {
+                InventoryCommand(executable: $0, arguments: args["arguments"] as? [String] ?? [])
+            }
+            try await manager.updateInventoryCommand(for: tunnel, command: command)
+            return outcome(tunnel.id, manager)
+        case "refresh_inventory":
+            let tunnel = try find(args, manager)
+            await manager.refreshInventory(for: tunnel)
+            return outcome(tunnel.id, manager)
         case "set_excluded_routes":
             guard let routes = args["routes"] as? [String] else { throw Failure("set_excluded_routes needs routes") }
             let tunnel = try find(args, manager)
@@ -140,7 +152,8 @@ enum DebugControlTools {
 
     private static func outcome(_ id: UUID?, _ manager: TunnelManager) -> [String: Any] {
         let tunnels = manager.tunnels.filter { id == nil || $0.id == id }
-        return ["tunnels": tunnels.map(summary), "error": orNull(manager.errorMessage)]
+        return ["tunnels": tunnels.map(summary), "error": orNull(manager.errorMessage),
+                "inventoryErrors": Dictionary(uniqueKeysWithValues: manager.inventoryErrors.map { ($0.key.uuidString, $0.value) })]
     }
 
     private static func summary(_ t: Tunnel) -> [String: Any] {
@@ -155,6 +168,8 @@ enum DebugControlTools {
             "lastHandshake": orNull(t.lastHandshake.map { ISO8601DateFormatter().string(from: $0) }),
             "connectedAt": orNull(t.connectedAt.map { ISO8601DateFormatter().string(from: $0) }),
             "rxBytes": t.rxBytes, "txBytes": t.txBytes,
+            "inventoryCommand": orNull(t.inventoryCommand?.executable),
+            "inventoryPrefixes": t.inventoryAllowedIPs,
             "runtimeConfig": orNull(t.runtimeConfigPath.map { URL(fileURLWithPath: $0).lastPathComponent }),
         ]
     }
