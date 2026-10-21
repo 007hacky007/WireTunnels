@@ -43,7 +43,9 @@ struct CommandRunnerTests {
         let progress = runner.run(executable: URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "printf '[#] wg setconf utun7 secret-file\\n' >&2; sleep 0.1; printf '[#] networksetup -setdnsservers secret-service secret-server\\n' >&2"], progress: { stages.append($0) })
         guard progress.exitCode == 0, stages == ["applying peer configuration and resolving endpoint", "updating system DNS"],
               CommandProgress.stage(for: "PrivateKey = synthetic-secret") == nil,
-              CommandProgress.stage(for: "[#] wg addconf utun7 secret-file") == "applying peer configuration and resolving endpoint" else { fatalError("Progress diagnostics leaked arguments or lost the stalled stage") }
+              CommandProgress.stage(for: "[#] wg addconf utun7 secret-file") == "applying peer configuration and resolving endpoint",
+              CommandProgress.stage(for: "[+] Selecting 1 active network service(s) for DNS") == "selecting active network services for DNS",
+              CommandProgress.stage(for: "[+] Restoring DNS after failed startup") == "restoring DNS after failed startup" else { fatalError("Progress diagnostics leaked arguments or lost the stalled stage") }
         print("PASS: command capture ignores inherited background descriptors and bounds hung setup")
     }
 }

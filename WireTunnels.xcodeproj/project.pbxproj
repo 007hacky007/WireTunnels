@@ -220,6 +220,9 @@
 				"$(SRCROOT)/Scripts/test_wg_quick_validator_path.sh",
 				"$(SRCROOT)/Scripts/wg-quick-bash3.patch",
 				"$(SRCROOT)/Scripts/wg-quick-dns-cleanup.patch",
+				"$(SRCROOT)/Scripts/wg-quick-cleanup.patch",
+				"$(SRCROOT)/Scripts/wg-quick-active-dns.patch",
+				"$(SRCROOT)/Scripts/wg-quick-dns-recovery.patch",
 				"$(SRCROOT)/WireTunnelsHelper/com.fmdigitech.WireTunnels.helper.plist",
 			);
 			name = "Build Wireguard Binaries";

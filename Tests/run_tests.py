@@ -25,6 +25,8 @@ def main():
         run_suite(directory, 'matching', [status_model, 'Tests/TunnelMatchingTests.swift'])
         run_suite(directory, 'commands', ['WireTunnelsHelper/CommandRunner.swift', 'Tests/CommandRunnerTests.swift'])
         run_suite(directory, 'logging', ['WireTunnels/Services/AppPaths.swift', 'WireTunnels/Services/LogService.swift', 'Tests/LogServiceTests.swift'])
+        subprocess.run(['python3', str(ROOT / 'Tests/test_wg_quick_cleanup.py')], check=True)
+        subprocess.run(['python3', str(ROOT / 'Tests/test_wg_quick_dns.py')], check=True)
         run_suite(directory, 'status', [status_model,
                   'WireTunnels/Services/StatusMonitorService.swift', 'Tests/StatusMonitorTests.swift'])
         run_suite(directory, 'duplication', [
