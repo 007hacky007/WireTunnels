@@ -30,10 +30,13 @@ struct RouteEntry: Codable, Equatable {
 final class WireGuardCommandService {
     nonisolated static let helperMachServiceName = "com.fmdigitech.WireTunnels.helper"
     nonisolated static let expectedHelperVersion = "1.0.6"
-    nonisolated static let expectedHelperProtocolRevision = "command-diagnostics-v1"
+    nonisolated static let expectedHelperProtocolRevision = "dns-recovery-v1"
     private static let helperCheckTimeoutNanoseconds: UInt64 = 3_000_000_000
     private static let keyGenerationTimeoutNanoseconds: UInt64 = 10_000_000_000
     nonisolated private static let operationTimeoutNanoseconds: UInt64 = 30_000_000_000
+    // Startup can need a separate DNS recovery attempt after a terminated
+    // wg-quick command. Let those bounded helper operations finish first.
+    nonisolated private static let tunnelOperationTimeoutNanoseconds: UInt64 = 75_000_000_000
     private static let toolInstallTimeoutNanoseconds: UInt64 = 60_000_000_000
     // Plist must be at Contents/Library/LaunchDaemons/ in the app bundle
     nonisolated static let helperPlistName = "com.fmdigitech.WireTunnels.helper.plist"
@@ -388,7 +391,7 @@ final class WireGuardCommandService {
     func startTunnel(configPath: String) async throws {
         let name = URL(fileURLWithPath: configPath).lastPathComponent
         do {
-            try await performHelperOperation(timeoutDescription: "Starting tunnel \(name)") { helper, complete in
+            try await performHelperOperation(timeoutDescription: "Starting tunnel \(name)", timeoutNanoseconds: Self.tunnelOperationTimeoutNanoseconds) { helper, complete in
                 helper.startTunnel(named: name) { success, errorMessage in
                     complete(success
                         ? .success(())
@@ -405,7 +408,7 @@ final class WireGuardCommandService {
     func stopTunnel(configPath: String) async throws {
         let name = URL(fileURLWithPath: configPath).lastPathComponent
         do {
-            try await performHelperOperation(timeoutDescription: "Stopping tunnel \(name)") { helper, complete in
+            try await performHelperOperation(timeoutDescription: "Stopping tunnel \(name)", timeoutNanoseconds: Self.tunnelOperationTimeoutNanoseconds) { helper, complete in
                 helper.stopTunnel(named: name) { success, errorMessage in
                     complete(success
                         ? .success(())
