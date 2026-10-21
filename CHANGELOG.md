@@ -1,8 +1,66 @@
 # Changelog
 
-This file tracks work in progress toward the next release (targeting **1.0.6**, following on from 1.0.5). It's more detailed than the public release notes in `appcast.xml` — use it as the technical/QA reference while testing, then distill the "Public release notes (draft)" section below into `appcast.xml` once a build is actually signed and tagged.
+This file tracks work in progress toward the next release and keeps the shipped ones as technical/QA reference. It's more detailed than the public release notes in `appcast.xml` — distill the "Public release notes (draft)" section of the unreleased version into `appcast.xml` once a build is actually signed and tagged.
 
-## Unreleased — 1.0.6 (in progress, not yet built/signed/tagged)
+## Unreleased — 1.0.7 (in progress, not yet built/signed/tagged)
+
+Integrates the community pull requests #9–#26 (thanks @007hacky007, @tobikris and @chocholom) and closes the open issues #6, #7 and #27. Per-app split tunneling (#5) is deferred to a later version.
+
+### Security
+- **wg-quick hook filter bypasses closed** (#25, @tobikris): crafted configurations could get past the hook filter and run commands as root through wg-quick. The filter now rejects those forms.
+
+### New features
+- **Inventory AllowedIPs** (#26, @chocholom): a personal tunnel can run a local command after connecting; the IPs/CIDRs it prints are validated (at least /8 for IPv4 and /32 for IPv6, no loopback, link-local, multicast or unspecified ranges), appended to the peer's static AllowedIPs and routed. The last inventory is cached; static and cached destinations stay blocked outside their VPN, also after disconnect or app quit. See `Scripts/INVENTORY.md`. Limits: personal single-peer tunnels, no bypass routes or hop chains.
+- **Search Domains field** (issue #6): the new and edit tunnel forms have a separate *Search Domains* field. It is written to the same `DNS =` line, which wg-quick already applies as macOS search domains while the tunnel is up and restores on disconnect. Domains are validated; only real addresses are used as split-DNS nameservers.
+- **Duplicate tunnel** (#10): context menu and detail page; the copy is disconnected and its On-Demand rules are off.
+- **Passive feedback for automatic recovery** (#18): failed automatic connects stay in the log instead of opening an alert; the menu bar and menu show connecting / reconnecting / connection lost with *Retry* and *Details*.
+- **Monochrome menu bar icon** (#16) and **automatic update-check setting** (#17).
+- Menu bar menu closes on outside clicks and before opening windows (#14), explains a missing setup, and applies the Dock preference at launch (#24).
+
+### Bug fixes
+- **Kill switch now blocks traffic.** Its rules were loaded into a PF anchor that the system ruleset never evaluates, so enabling it had no effect. The rules now live under `com.apple/wiretunnels.killswitch` (evaluated by the standard `anchor "com.apple/*"`), the endpoint exception is limited to root-owned UDP and keeps PF state so the server's replies are accepted, and the old anchor is flushed. Verified live: with the kill switch on, traffic outside the tunnel is blocked while the tunnel keeps working, and quitting the app releases it.
+- **Quit waits for tunnel cleanup** (#23): new connections are blocked while quitting, pending operations finish, tunnels are disconnected and re-checked, DNS and network settings are restored, and a failed cleanup offers *Retry* or *Cancel Quit*. Connect controls require installed, verified tools.
+- **DNS** (#12): only the active network services are changed, every touched service is restored after a network switch, and a persistent journal repairs DNS left behind by an interrupted setup or a helper restart.
+- **Sleep and wake** (#13, issue #27): helper timeouts count awake time only, so the error shown after opening the lid no longer appears.
+- **Helper commands are bounded and traced** (#11): `wg-quick up` has a 20-second deadline with rollback, log lines carry timings, and private keys are redacted.
+- **Tunnels are matched by their live runtime configs** (#9), so profiles sharing keys and endpoint keep separate status, traffic and disconnect paths.
+- **Shared tunnel editor** (#19, issue #7): *Edit Config* loads the shared tunnel's configuration instead of an empty editor.
+- Preserve tunnel display names (#20), protect saved tunnel metadata from corruption (#21), no On-Demand reconnects when opening tunnel details (#22), and no warning for a single full tunnel (#15).
+
+### Helper
+- Protocol revision `inventory-routing-v2` and version 1.0.7: installed helpers are detected as stale and replaced on first launch. The helper's launch daemon now has `RunAtLoad`, so saved inventory protection and DNS repair are restored at boot without waiting for the app.
+
+### Known limitations / follow-ups
+- DNS values left behind by older versions are restored as they are. If your services still point at a VPN-only DNS server while no tunnel is up, reset them in System Settings > Network > Details > DNS, or with `sudo networksetup -setdnsservers "<service>" Empty`.
+- Enabling the kill switch now has an effect: traffic is blocked whenever its tunnel is not up.
+- Inventory protection could not be tested end to end against a real server; it was verified with the real helper using documentation addresses.
+
+### Public release notes (draft — for `appcast.xml` once this is actually built, signed, and tagged)
+
+```html
+<ul>
+    <li>Kill switch fixed: it now really blocks traffic outside the tunnel while it is enabled</li>
+    <li>Security: closed wg-quick hook filter bypasses that could run commands as root from a crafted configuration</li>
+    <li>New: per-tunnel inventory command that adds discovered IPs/CIDRs to a tunnel's AllowedIPs and routes, and keeps them protected outside the VPN</li>
+    <li>New: Search Domains field for tunnels, applied while connected and restored on disconnect</li>
+    <li>New: duplicate a tunnel, monochrome menu bar icon and an automatic update-check setting</li>
+    <li>Automatic reconnect failures no longer pop up alerts: the menu bar shows connecting, reconnecting or connection lost, with Retry and Details</li>
+    <li>Quitting waits for tunnels to disconnect and DNS to be restored, and lets you retry or cancel if cleanup fails</li>
+    <li>DNS only changes on the active network and is repaired after an interrupted setup</li>
+    <li>Fixed the error shown after waking from sleep and an empty editor for shared tunnels</li>
+    <li>The menu closes when you click elsewhere, tunnel names are preserved and saved metadata is protected from corruption</li>
+</ul>
+<p><strong>Notes</strong></p>
+<ul>
+    <li>Existing installs will be prompted to update the privileged helper on first launch after upgrading</li>
+    <li>If you use the kill switch, traffic is now blocked whenever its tunnel is down; turn it off per tunnel if you do not want that</li>
+    <li>If your DNS still points to a VPN-only server from an older version, reset it in System Settings &gt; Network &gt; Details &gt; DNS</li>
+</ul>
+```
+
+---
+
+## 1.0.6 — released 2026-10-09
 
 Prompted by a user (James) testing the Shared Tunnels feature — see the three follow-up requests below.
 

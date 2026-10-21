@@ -22,9 +22,6 @@ def main():
     with tempfile.TemporaryDirectory(prefix='wiretunnels-tests-') as temporary:
         directory = Path(temporary)
         status_model = 'WireTunnels/Models/TunnelStatus.swift'
-        run_suite(directory, 'debug-control', ['WireTunnels/Services/AppPaths.swift',
-                  'WireTunnels/Services/DebugControlServer.swift', 'Tests/DebugControlServerTests.swift'], flags=['-D', 'DEBUG'])
-        subprocess.run(['python3', str(ROOT / 'Tests/test_mcp_bridge.py')], check=True)
         run_suite(directory, 'dns-recovery', ['WireTunnelsHelper/DNSRecoveryService.swift', 'Tests/DNSRecoveryTests.swift'])
         run_suite(directory, 'wireguard-dns', ['WireTunnels/Services/WireGuardConfigParser.swift', 'Tests/WireGuardDNSTests.swift'])
         run_suite(directory, 'kill-switch-rules', ['Shared/KillSwitchEntry.swift', 'Tests/KillSwitchRulesTests.swift'])

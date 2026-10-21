@@ -138,16 +138,17 @@ WireTunnels is distributed as a signed and notarized macOS `.dmg` disk image, an
 
 ---
 
-## What's new in 1.0.6
+## What's new in 1.0.7
 
-* **Split DNS** — send only chosen domains (e.g. `lan`, `corp.example`) to a tunnel's DNS servers while everything else keeps using your normal DNS. Works for personal and shared tunnels.
-* **Long tunnel names** — names up to 50 characters now work everywhere (import, create, edit); the name you pick is the name you see.
-* **Correct status for clients sharing a server** — two client profiles for the same server key and port are no longer shown as connected together.
-* **Shared tunnel access control** — administrators can allow or block other users from connecting and/or disconnecting a shared tunnel.
-* **Start in Background** — skip opening the dashboard on launch; pair it with *Hide Dock Icon* for a menu-bar-only app.
-* **Admin-protected Launch at Login** — administrators can require an admin password to turn off Launch at Login.
+* **Working kill switch** — enabling it now really blocks traffic outside the tunnel; its rules were previously never evaluated by the system firewall.
+* **Security fix** — closed wg-quick hook filter bypasses that could run commands as root from a crafted configuration.
+* **Inventory AllowedIPs** — a personal tunnel can run a local command after connecting and add the validated IPs/CIDRs it prints to its AllowedIPs and routes; they stay protected outside the VPN.
+* **Search Domains** — a dedicated field for DNS search domains, applied while connected and restored on disconnect.
+* **Duplicate tunnel**, **monochrome menu bar icon** and an **automatic update-check** setting.
+* **Quieter recovery** — failed automatic reconnects stay in the log; the menu bar and menu show connecting, reconnecting or connection lost with *Retry* and *Details*.
+* **Safer quit and DNS** — quitting waits for cleanup and restores DNS; DNS only changes on the active network and is repaired after an interrupted setup; sleep no longer triggers timeout errors.
 
-Earlier highlights (1.0.x): multi-hop chains, Shortcuts/Siri support, split-tunnel exclusions, throughput speed test, DHCP/sleep/DDNS auto-recovery, editable shared tunnels, notarized DMG distribution and in-app updates.
+Earlier highlights (1.0.x): split DNS, long tunnel names, shared tunnel access control, start in background, multi-hop chains, Shortcuts/Siri support, split-tunnel exclusions, throughput speed test, DHCP/sleep/DDNS auto-recovery, editable shared tunnels, notarized DMG distribution and in-app updates.
 
 See [CHANGELOG.md](./CHANGELOG.md) for the full technical detail.
 

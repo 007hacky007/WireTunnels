@@ -106,6 +106,8 @@ final class ConfigStorageService {
               }) else {
             throw ConfigStorageError.invalidName(name)
         }
+        // Reset App Data removes the folder while the app keeps running.
+        try fm.createDirectory(at: configDirectory, withIntermediateDirectories: true)
         return configDirectory.appendingPathComponent("\(baseName).conf", isDirectory: false)
     }
 

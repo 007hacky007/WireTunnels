@@ -56,17 +56,17 @@
 			path = WireTunnelsHelper;
 			sourceTree = "<group>";
 		};
+		ABCD00112FDC11AA00000001 /* Shared */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Shared;
+			sourceTree = "<group>";
+		};
 		DCF55BA22FDC10DD00D04602 /* WireTunnels */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
 				DC6DAE0E2FFBAB4D00512A94 /* Exceptions for "WireTunnels" folder in "WireTunnels" target */,
 			);
 			path = WireTunnels;
-			sourceTree = "<group>";
-		};
-		ABCD00112FDC11AA00000001 /* Shared */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = Shared;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -124,8 +124,8 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
-				ABCD00112FDC11AA00000001 /* Shared */,
 				AAAA00012FDC11AA00000001 /* WireTunnelsHelper */,
+				ABCD00112FDC11AA00000001 /* Shared */,
 			);
 			name = WireTunnelsHelper;
 			packageProductDependencies = (
@@ -444,7 +444,7 @@
 				CODE_SIGN_ENTITLEMENTS = WireTunnels/WireTunnels.entitlements;
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 7;
+				CURRENT_PROJECT_VERSION = 8;
 				DEVELOPMENT_TEAM = 48W4Z4X56T;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -460,7 +460,7 @@
 				INFOPLIST_KEY_SUPublicEDKey = "YFTXWuQkChzuy1Zhc2i2oJX3qunpBrIS7JZTWcZFobw=";
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.0.6;
+				MARKETING_VERSION = 1.0.7;
 				PRODUCT_BUNDLE_IDENTIFIER = com.fmdigitech.WireTunnels;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
@@ -481,7 +481,7 @@
 				CODE_SIGN_ENTITLEMENTS = WireTunnels/WireTunnels.entitlements;
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 7;
+				CURRENT_PROJECT_VERSION = 8;
 				DEVELOPMENT_TEAM = 48W4Z4X56T;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -497,7 +497,7 @@
 				INFOPLIST_KEY_SUPublicEDKey = "YFTXWuQkChzuy1Zhc2i2oJX3qunpBrIS7JZTWcZFobw=";
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.0.6;
+				MARKETING_VERSION = 1.0.7;
 				PRODUCT_BUNDLE_IDENTIFIER = com.fmdigitech.WireTunnels;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;

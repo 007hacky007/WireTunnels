@@ -3,7 +3,7 @@ import Darwin
 import Foundation
 import Security
 
-private let helperVersionNumber = "1.0.6"
+private let helperVersionNumber = "1.0.7"
 private let helperProtocolRevisionValue = "inventory-routing-v2"
 private let applicationIdentifier = "com.fmdigitech.WireTunnels"
 private let applicationTeamIdentifier = "48W4Z4X56T"
