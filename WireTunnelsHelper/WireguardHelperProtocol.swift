@@ -3,6 +3,7 @@ import Foundation
 @objc protocol WireguardHelperProtocol {
     func startTunnel(named name: String, reply: @escaping (Bool, String?) -> Void)
     func stopTunnel(named name: String, reply: @escaping (Bool, String?) -> Void)
+    func recoverDNSState(reply: @escaping (Bool, String?) -> Void)
     func runWgShow(reply: @escaping (String?, String?) -> Void)
     func runtimeStatusSnapshot(reply: @escaping (Data?, String?) -> Void)
     func commandDiagnostics(reply: @escaping (Data?, String?) -> Void)

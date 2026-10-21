@@ -30,7 +30,7 @@ struct RouteEntry: Codable, Equatable {
 final class WireGuardCommandService {
     nonisolated static let helperMachServiceName = "com.fmdigitech.WireTunnels.helper"
     nonisolated static let expectedHelperVersion = "1.0.6"
-    nonisolated static let expectedHelperProtocolRevision = "dns-recovery-v1"
+    nonisolated static let expectedHelperProtocolRevision = "quit-dns-recovery-v1"
     private static let helperCheckTimeoutNanoseconds: UInt64 = 3_000_000_000
     private static let keyGenerationTimeoutNanoseconds: UInt64 = 10_000_000_000
     nonisolated private static let operationTimeoutNanoseconds: UInt64 = 30_000_000_000
@@ -443,6 +443,14 @@ final class WireGuardCommandService {
         }
     }
 
+    func recoverDNSState() async throws {
+        try await performHelperOperation(timeoutDescription: "Restoring tunnel DNS", timeoutNanoseconds: 20_000_000_000) { helper, complete in
+            helper.recoverDNSState { success, errorMessage in
+                complete(success ? .success(()) : .failure(CommandError.statusFailed(errorMessage ?? "DNS recovery failed")))
+            }
+        }
+    }
+
     func syncKillSwitch(entries: [KillSwitchEntry]) async throws {
         let data = try JSONEncoder().encode(entries)
         return try await performHelperOperation(timeoutDescription: "Updating kill switch") { helper, complete in
@@ -481,18 +489,6 @@ final class WireGuardCommandService {
         }
     }
 
-    func getWgShowOutput() async throws -> String {
-        try await performHelperOperation(timeoutDescription: "Refreshing tunnel status") { helper, complete in
-            helper.runWgShow { output, errorMessage in
-                if let output = output {
-                    complete(.success(output))
-                } else {
-                    complete(.failure(CommandError.statusFailed(errorMessage ?? "Unknown")))
-                }
-            }
-        }
-    }
-
     func getRuntimeStatusSnapshot() async throws -> WireGuardStatusSnapshot {
         let data: Data = try await performHelperOperation(timeoutDescription: "Refreshing tunnel status") { helper, complete in
             helper.runtimeStatusSnapshot { data, errorMessage in
@@ -505,6 +501,20 @@ final class WireGuardCommandService {
         }
         return try JSONDecoder().decode(WireGuardStatusSnapshot.self, from: data)
     }
+
+
+    func getWgShowOutput() async throws -> String {
+        try await performHelperOperation(timeoutDescription: "Refreshing tunnel status") { helper, complete in
+            helper.runWgShow { output, errorMessage in
+                if let output = output {
+                    complete(.success(output))
+                } else {
+                    complete(.failure(CommandError.statusFailed(errorMessage ?? "Unknown")))
+                }
+            }
+        }
+    }
+
 
     func generateKeyPair() async throws -> (privateKey: String, publicKey: String) {
         _ = try getHelper()

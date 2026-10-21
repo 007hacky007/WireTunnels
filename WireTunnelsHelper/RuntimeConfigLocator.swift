@@ -3,6 +3,22 @@ import Foundation
 /// Resolves wg-quick's config aliases to their userspace utun interfaces.
 /// A recycled utun must not inherit a stale alias from an earlier connection.
 enum RuntimeConfigLocator {
+    /// Without wg, a userspace socket prevents claiming that all tunnels are down.
+    static func hasUserspaceSockets(in directory: URL) throws -> Bool {
+        let fm = FileManager.default
+        let files: [URL]
+        do { files = try fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) }
+        catch CocoaError.fileReadNoSuchFile { return false }
+        return try files.contains { file in
+            let name = file.deletingPathExtension().lastPathComponent
+            guard file.pathExtension == "sock", name.hasPrefix("utun"),
+                  !name.dropFirst(4).isEmpty,
+                  name.dropFirst(4).allSatisfy({ $0.isASCII && $0.isNumber }) else { return false }
+            let attributes = try fm.attributesOfItem(atPath: file.path)
+            return attributes[.type] as? FileAttributeType == .typeSocket
+        }
+    }
+
     static func configPaths(
         in directory: URL,
         resolveConfig: (String) -> URL?

@@ -26,6 +26,10 @@ def main():
                   'WireTunnels/Services/DebugControlServer.swift', 'Tests/DebugControlServerTests.swift'], flags=['-D', 'DEBUG'])
         subprocess.run(['python3', str(ROOT / 'Tests/test_mcp_bridge.py')], check=True)
         run_suite(directory, 'dns-recovery', ['WireTunnelsHelper/DNSRecoveryService.swift', 'Tests/DNSRecoveryTests.swift'])
+        run_suite(directory, 'shutdown', ['WireTunnels/Services/TunnelShutdownCoordinator.swift', 'Tests/TunnelShutdownTests.swift'])
+        run_suite(directory, 'readiness', ['WireTunnels/Models/WireGuardRuntimeStatus.swift',
+                  'WireTunnels/Models/WireGuardEnvironment.swift', 'WireTunnels/Models/TunnelConnectionReadiness.swift',
+                  'Tests/TunnelConnectionReadinessTests.swift'])
         run_suite(directory, 'awake-timeout', ['WireTunnels/Services/AwakeTimeout.swift', 'Tests/AwakeTimeoutTests.swift'])
         run_suite(directory, 'menu-dismissal', ['WireTunnels/Services/MenuBarDismissalController.swift', 'Tests/MenuBarDismissalTests.swift'])
         run_suite(directory, 'matching', [status_model, 'Tests/TunnelMatchingTests.swift'])

@@ -9,6 +9,7 @@ extension Notification.Name {
 // overriding SwiftUI's saved-close-state restoration (Window scenes remember if the user closed them).
 private class AppDelegate: NSObject, NSApplicationDelegate {
     var tunnelManager: TunnelManager?
+    private var terminationPending = false
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
         // Clicking the Dock icon when all windows are closed re-opens the dashboard.
@@ -24,10 +25,26 @@ private class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let tm = tunnelManager, tm.hasActiveTunnels else { return .terminateNow }
+        if terminationPending { return .terminateLater }
+        guard let manager = tunnelManager ?? AppIntentBridge.tunnelManager else { return .terminateNow }
+        terminationPending = true
         Task { @MainActor in
-            await tm.stopAllActive()
-            NSApp.reply(toApplicationShouldTerminate: true)
+            while await !manager.prepareForQuit() {
+                let alert = NSAlert()
+                alert.messageText = "WireTunnels could not disconnect safely"
+                alert.informativeText = (manager.quitFailureReason ?? "Tunnel cleanup failed.")
+                    + "\n\n" + (manager.errorMessage ?? "Check the connection and try again.")
+                alert.addButton(withTitle: "Retry")
+                alert.addButton(withTitle: "Cancel Quit")
+                if alert.runModal() != .alertFirstButtonReturn {
+                    await manager.cancelQuit()
+                    self.terminationPending = false
+                    sender.reply(toApplicationShouldTerminate: false)
+                    return
+                }
+            }
+            self.terminationPending = false
+            sender.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater
     }
