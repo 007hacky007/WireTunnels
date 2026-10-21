@@ -8,6 +8,39 @@
         <description>WireTunnels update feed</description>
         <language>en</language>
         <item>
+            <title>Version 1.0.7</title>
+            <pubDate>Wed, 21 Oct 2026 00:00:00 +0000</pubDate>
+            <sparkle:version>8</sparkle:version>
+            <sparkle:shortVersionString>1.0.7</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[
+                <ul>
+                    <li>Kill switch fixed: it now really blocks traffic outside the tunnel while it is enabled</li>
+                    <li>Security: closed wg-quick hook filter bypasses that could run commands as root from a crafted configuration</li>
+                    <li>New: per-tunnel inventory command that adds discovered IPs/CIDRs to a tunnel's AllowedIPs and routes, and keeps them protected outside the VPN</li>
+                    <li>New: Search Domains field for tunnels, applied while connected and restored on disconnect</li>
+                    <li>New: duplicate a tunnel, monochrome menu bar icon and an automatic update-check setting</li>
+                    <li>Automatic reconnect failures no longer pop up alerts: the menu bar shows connecting, reconnecting or connection lost, with Retry and Details</li>
+                    <li>Quitting waits for tunnels to disconnect and DNS to be restored, and lets you retry or cancel if cleanup fails</li>
+                    <li>DNS only changes on the active network and is repaired after an interrupted setup</li>
+                    <li>Fixed the error shown after waking from sleep and an empty editor for shared tunnels</li>
+                    <li>The menu closes when you click elsewhere, tunnel names are preserved and saved metadata is protected from corruption</li>
+                </ul>
+                <p><strong>Notes</strong></p>
+                <ul>
+                    <li>Existing installs will be prompted to update the privileged helper on first launch after upgrading</li>
+                    <li>If you use the kill switch, traffic is now blocked whenever its tunnel is down; turn it off per tunnel if you do not want that</li>
+                    <li>If your DNS still points to a VPN-only server from an older version, reset it in System Settings &gt; Network &gt; Details &gt; DNS</li>
+                </ul>
+            ]]></description>
+            <enclosure
+                url="https://github.com/FMDigitech/WireTunnels/releases/download/v1.0.7/WireTunnels-1.0.7.dmg"
+                sparkle:edSignature="qhLSVCLE2tbr0iStRn9xoTgQu4k4JGJQ9aPqYspwBzgIux5dwKmUYvQ4TNMHRM8UcfJe3ZlbvktMhYCQyT6KCw=="
+                length="14521969"
+                type="application/octet-stream"
+            />
+        </item>
+        <item>
             <title>Version 1.0.6</title>
             <pubDate>Fri, 09 Oct 2026 00:00:00 +0000</pubDate>
             <sparkle:version>7</sparkle:version>

@@ -2,7 +2,7 @@
 
 This file tracks work in progress toward the next release and keeps the shipped ones as technical/QA reference. It's more detailed than the public release notes in `appcast.xml` — distill the "Public release notes (draft)" section of the unreleased version into `appcast.xml` once a build is actually signed and tagged.
 
-## Unreleased — 1.0.7 (in progress, not yet built/signed/tagged)
+## 1.0.7 — released 2026-10-21
 
 Integrates the community pull requests #9–#26 (thanks @007hacky007, @tobikris and @chocholom) and closes the open issues #6, #7 and #27. Per-app split tunneling (#5) is deferred to a later version.
 
