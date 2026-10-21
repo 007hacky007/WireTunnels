@@ -171,6 +171,13 @@ Import existing `.conf` files or create new tunnels using the basic editor, adva
 
 Monitor tunnel status, latest handshake, endpoint, interface, DNS, Allowed IPs, traffic usage and throughput sparklines in real time. A built-in connection test reports latency and, if you provide your own HTTPS URL, download throughput — no third-party host is ever contacted by default.
 
+### Inventory AllowedIPs
+
+Personal tunnels can run a local command after connecting to discover additional
+IPs/CIDRs, append them to the static AllowedIPs, and install their routes. The last
+successful inventory is cached; static and cached destinations remain protected
+when disconnected. See [setup, Python example, and limitations](Scripts/INVENTORY.md).
+
 ### Multi-hop chains
 
 Pair two personal tunnels so that one ("hop") is brought up first and the other ("exit") routes its WireGuard traffic through it: the exit server sees the hop's IP, not yours. Chains are connected and disconnected as a unit from the *Multi-Hop* section, and survive sleep/wake.

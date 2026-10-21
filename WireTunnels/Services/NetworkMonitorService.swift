@@ -58,10 +58,12 @@ final class NetworkMonitorService: NSObject, ObservableObject {
     private var suppressedIDs: Set<UUID>     = []
 
     init(readPhysicalNetwork: @escaping @MainActor () -> PhysicalNetworkSnapshot? = PhysicalNetworkSnapshot.readSystem,
-         diagnostics: LogService? = nil) {
+         diagnostics: LogService? = nil,
+         startMonitoring: Bool = true) {
         self.readPhysicalNetwork = readPhysicalNetwork
         self.diagnostics = diagnostics ?? .shared
         super.init()
+        guard startMonitoring else { return }
         locationManager.delegate = self
         updateWiFiNamePermission()
 

@@ -12,7 +12,7 @@
     <key>BundleProgram</key>
     <string>Contents/Library/LaunchDaemons/com.fmdigitech.WireTunnels.helper</string>
     <key>RunAtLoad</key>
-    <false/>
+    <true/>
     <key>AssociatedBundleIdentifiers</key>
     <array>
         <string>com.fmdigitech.WireTunnels</string>

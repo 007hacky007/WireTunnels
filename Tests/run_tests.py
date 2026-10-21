@@ -26,6 +26,10 @@ def main():
                   'WireTunnels/Services/DebugControlServer.swift', 'Tests/DebugControlServerTests.swift'], flags=['-D', 'DEBUG'])
         subprocess.run(['python3', str(ROOT / 'Tests/test_mcp_bridge.py')], check=True)
         run_suite(directory, 'dns-recovery', ['WireTunnelsHelper/DNSRecoveryService.swift', 'Tests/DNSRecoveryTests.swift'])
+        run_suite(directory, 'kill-switch-rules', ['Shared/KillSwitchEntry.swift', 'Tests/KillSwitchRulesTests.swift'])
+        subprocess.run(['bash', str(ROOT / 'Tests/test_inventory_routing.sh')], check=True)
+        subprocess.run(['python3', '-m', 'unittest', 'discover', '-s', 'Tests', '-p', 'test_server_ips.py'],
+                       cwd=ROOT, env={**os.environ, 'PYTHONPATH': str(ROOT)}, check=True)
         run_suite(directory, 'shutdown', ['WireTunnels/Services/TunnelShutdownCoordinator.swift', 'Tests/TunnelShutdownTests.swift'])
         run_suite(directory, 'readiness', ['WireTunnels/Models/WireGuardRuntimeStatus.swift',
                   'WireTunnels/Models/WireGuardEnvironment.swift', 'WireTunnels/Models/TunnelConnectionReadiness.swift',
@@ -42,7 +46,7 @@ def main():
         run_suite(directory, 'status', [status_model,
                   'WireTunnels/Services/StatusMonitorService.swift', 'Tests/StatusMonitorTests.swift'])
         run_suite(directory, 'duplication', [
-            'WireTunnels/Models/AutoConnectRule.swift', 'WireTunnels/Models/Tunnel.swift',
+            'Shared/InventoryRouting.swift', 'WireTunnels/Models/AutoConnectRule.swift', 'WireTunnels/Models/Tunnel.swift',
             'WireTunnels/Services/AppPaths.swift', 'WireTunnels/Services/ConfigStorageService.swift',
             'WireTunnels/Services/WireGuardConfigParser.swift',
             'WireTunnels/Services/TunnelDuplicationService.swift', 'Tests/TunnelDuplicationTests.swift'

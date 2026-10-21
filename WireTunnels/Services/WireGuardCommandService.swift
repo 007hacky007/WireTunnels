@@ -10,12 +10,6 @@ struct SplitDNSEntry: Codable, Equatable {
     let servers: [String]
 }
 
-struct KillSwitchEntry: Codable {
-    let interfaceName: String
-    let endpointHost: String
-    let endpointPort: Int
-}
-
 /// A privileged route to install/remove. `cidr` is the network or host (e.g.
 /// "10.0.5.0/24" or "203.0.113.9/32") to steer; exactly one of `gateway`/
 /// `interfaceName` must be set. Shared by split-tunnel exclusions (route to the
@@ -30,7 +24,7 @@ struct RouteEntry: Codable, Equatable {
 final class WireGuardCommandService {
     nonisolated static let helperMachServiceName = "com.fmdigitech.WireTunnels.helper"
     nonisolated static let expectedHelperVersion = "1.0.6"
-    nonisolated static let expectedHelperProtocolRevision = "quit-dns-recovery-v1"
+    nonisolated static let expectedHelperProtocolRevision = "inventory-routing-v2"
     private static let helperCheckTimeoutNanoseconds: UInt64 = 3_000_000_000
     private static let keyGenerationTimeoutNanoseconds: UInt64 = 10_000_000_000
     nonisolated private static let operationTimeoutNanoseconds: UInt64 = 30_000_000_000
@@ -43,6 +37,9 @@ final class WireGuardCommandService {
 
     private var connection: NSXPCConnection?
     private var seenCommandEvents: Set<UUID> = []
+    private let injectedHelper: WireguardHelperProtocol?
+
+    init(helper: WireguardHelperProtocol? = nil) { injectedHelper = helper }
     // Kept alive across calls so the admin credential it caches is reused instead
     // of re-prompting for a password on every shared-tunnel operation. macOS ties
     // that cache to the specific AuthorizationRef, not just the login session.
@@ -186,20 +183,26 @@ final class WireGuardCommandService {
     }
 
     private func getHelper() throws -> WireguardHelperProtocol {
+        if let injectedHelper { return injectedHelper }
         if connection == nil {
             let conn = NSXPCConnection(machServiceName: Self.helperMachServiceName, options: .privileged)
             conn.remoteObjectInterface = NSXPCInterface(with: WireguardHelperProtocol.self)
             conn.resume()
             connection = conn
         }
-        guard let helper = connection?.remoteObjectProxyWithErrorHandler({ [weak self] error in
+        guard let helper = proxyWithErrorHandler({ [weak self] error in
             Task { @MainActor in
                 self?.connection = nil
             }
-        }) as? WireguardHelperProtocol else {
+        }) else {
             throw CommandError.connectionFailed
         }
         return helper
+    }
+
+    private func proxyWithErrorHandler(_ handler: @escaping (Error) -> Void) -> WireguardHelperProtocol? {
+        if let injectedHelper { return injectedHelper }
+        return connection?.remoteObjectProxyWithErrorHandler(handler) as? WireguardHelperProtocol
     }
 
     private func performHelperOperation<T>(
@@ -249,13 +252,13 @@ final class WireGuardCommandService {
                 resume(.failure(CommandError.operationTimedOut(timeoutDescription)))
             }
 
-            guard let proxy = connection?.remoteObjectProxyWithErrorHandler({ [weak self] error in
+            guard let proxy = proxyWithErrorHandler({ [weak self] error in
                 Task { @MainActor in
                     timeoutTask.cancel()
                     self?.connection = nil
                     resume(.failure(CommandError.connectionInterrupted(error.localizedDescription)))
                 }
-            }) as? WireguardHelperProtocol else {
+            }) else {
                 timeoutTask.cancel()
                 resume(.failure(CommandError.connectionFailed))
                 return
@@ -287,13 +290,13 @@ final class WireGuardCommandService {
                 resume(.failure(CommandError.helperCheckTimedOut))
             }
 
-            guard let proxy = connection?.remoteObjectProxyWithErrorHandler({ [weak self] error in
+            guard let proxy = proxyWithErrorHandler({ [weak self] error in
                 Task { @MainActor in
                     timeoutTask.cancel()
                     self?.connection = nil
                     resume(.failure(CommandError.connectionInterrupted(error.localizedDescription)))
                 }
-            }) as? WireguardHelperProtocol else {
+            }) else {
                 timeoutTask.cancel()
                 resume(.failure(CommandError.connectionFailed))
                 return
@@ -325,13 +328,13 @@ final class WireGuardCommandService {
                 resume(.failure(CommandError.helperCheckTimedOut))
             }
 
-            guard let proxy = connection?.remoteObjectProxyWithErrorHandler({ [weak self] error in
+            guard let proxy = proxyWithErrorHandler({ [weak self] error in
                 Task { @MainActor in
                     timeoutTask.cancel()
                     self?.connection = nil
                     resume(.failure(CommandError.connectionInterrupted(error.localizedDescription)))
                 }
-            }) as? WireguardHelperProtocol else {
+            }) else {
                 timeoutTask.cancel()
                 resume(.failure(CommandError.connectionFailed))
                 return
@@ -363,13 +366,13 @@ final class WireGuardCommandService {
                 resume(.failure(CommandError.operationTimedOut("Installing WireGuard tools")))
             }
 
-            guard let proxy = connection?.remoteObjectProxyWithErrorHandler({ [weak self] error in
+            guard let proxy = proxyWithErrorHandler({ [weak self] error in
                 Task { @MainActor in
                     timeoutTask.cancel()
                     self?.connection = nil
                     resume(.failure(CommandError.connectionInterrupted(error.localizedDescription)))
                 }
-            }) as? WireguardHelperProtocol else {
+            }) else {
                 timeoutTask.cancel()
                 resume(.failure(CommandError.connectionFailed))
                 return
@@ -515,6 +518,14 @@ final class WireGuardCommandService {
         }
     }
 
+    func updateInventoryRouting(_ request: InventoryRoutingRequest) async throws {
+        let data = try JSONEncoder().encode(request)
+        try await performHelperOperation(timeoutDescription: "Updating inventory AllowedIPs and routes") { helper, complete in
+            helper.updateInventoryRouting(request: data) { success, message in
+                complete(success ? .success(()) : .failure(InventoryError.operation(message ?? "Inventory routing failed")))
+            }
+        }
+    }
 
     func generateKeyPair() async throws -> (privateKey: String, publicKey: String) {
         _ = try getHelper()
@@ -533,13 +544,13 @@ final class WireGuardCommandService {
                 resume(.failure(CommandError.keyGenerationFailed("Request timed out")))
             }
 
-            guard let proxy = connection?.remoteObjectProxyWithErrorHandler({ [weak self] error in
+            guard let proxy = proxyWithErrorHandler({ [weak self] error in
                 Task { @MainActor in
                     timeoutTask.cancel()
                     self?.connection = nil
                     resume(.failure(CommandError.connectionInterrupted(error.localizedDescription)))
                 }
-            }) as? WireguardHelperProtocol else {
+            }) else {
                 timeoutTask.cancel()
                 resume(.failure(CommandError.connectionFailed))
                 return

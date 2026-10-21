@@ -4,7 +4,7 @@ import Foundation
 import Security
 
 private let helperVersionNumber = "1.0.6"
-private let helperProtocolRevisionValue = "quit-dns-recovery-v1"
+private let helperProtocolRevisionValue = "inventory-routing-v2"
 private let applicationIdentifier = "com.fmdigitech.WireTunnels"
 private let applicationTeamIdentifier = "48W4Z4X56T"
 private let systemRoot = URL(fileURLWithPath: "/Library/Application Support/WireTunnels")
@@ -182,12 +182,6 @@ private struct SplitDNSEntry: Codable {
     let ownerId: String
     let domains: [String]
     let servers: [String]
-}
-
-private struct KillSwitchEntry: Codable {
-    let interfaceName: String
-    let endpointHost: String
-    let endpointPort: Int
 }
 
 private struct RouteEntry: Codable, Equatable {
@@ -470,6 +464,7 @@ private struct ValidatedClient {
 
 final class HelperTool: NSObject, NSXPCListenerDelegate {
     private let listener: NSXPCListener
+    private var inventoryMonitor: InventoryInterfaceMonitor?
 
     override init() {
         listener = NSXPCListener(machServiceName: "com.fmdigitech.WireTunnels.helper")
@@ -484,6 +479,21 @@ final class HelperTool: NSObject, NSXPCListenerDelegate {
             DispatchQueue.global(qos: .utility).async {
                 _ = CommandRunner().run(executable: executable, arguments: ["--dns-recover"], timeout: 15, terminationGrace: 3)
             }
+        }
+        let bootstrap = HelperSession(clientBundleURL: Bundle.main.bundleURL, clientUser: ClientUser(uid: 0, username: "root"))
+        do { try bootstrap.restoreInventoryProtection() }
+        catch { NSLog("Inventory protection could not be restored: %@", error.localizedDescription) }
+        do {
+            inventoryMonitor = try InventoryInterfaceMonitor {
+                HelperSession.inventoryQueue.async {
+                    do { try bootstrap.reconcileInventoryProtection() }
+                    catch { NSLog("Inventory interface protection failed: %@", error.localizedDescription) }
+                }
+            }
+            HelperSession.inventoryMonitoringAvailable = true
+        } catch {
+            // A running helper must not grant interface exceptions without a watcher.
+            NSLog("Inventory interface monitoring unavailable: %@", error.localizedDescription)
         }
         listener.resume()
         RunLoop.main.run()
@@ -504,9 +514,100 @@ final class HelperTool: NSObject, NSXPCListenerDelegate {
 }
 
 private final class HelperSession: NSObject, WireguardHelperProtocol {
+    static let inventoryQueue = DispatchQueue(label: "com.fmdigitech.wiretunnels.inventory")
+    static var inventoryMonitoringAvailable = false
     private let clientBundleURL: URL
     private let clientUser: ClientUser
     private let fileManager = FileManager.default
+
+    private lazy var inventoryService = InventoryRoutingService(
+        file: systemRoot.appendingPathComponent("inventory/policies.json"),
+        run: { [unowned self] executable, arguments, input in
+            let result = self.runCommand(executable: executable, arguments: arguments, standardInput: input)
+            guard result.exitCode == 0 || (arguments == ["-e"] && result.stderr.contains("already enabled")) else {
+                throw InventoryError.operation("Inventory networking command failed: \(executable.lastPathComponent)")
+            }
+            return result.stdout
+        },
+        resolve: { [unowned self] request in try self.inventoryInterface(request) },
+        updatePeer: { [unowned self] interface, peer, prefixes in
+            guard if_nametoindex(interface.name) == interface.index else { throw InventoryError.staleOperation }
+            let wg = try self.verifiedInstalledWg()
+            let result = self.runCommand(executable: wg, arguments: ["addconf", interface.name, "/dev/stdin"],
+                standardInput: "[Peer]\nPublicKey = \(peer)\nAllowedIPs = \(prefixes.joined(separator: ","))\n")
+            guard result.exitCode == 0 else { throw InventoryError.operation("Unable to update WireGuard AllowedIPs") }
+        },
+        route: { add, prefix, interface in
+            let socket = try InventoryRouteSocket()
+            if add { try socket.add(prefix, interface: interface.name, expectedIndex: interface.index) }
+            else { try socket.remove(prefix, interface: interface.name, expectedIndex: interface.index) }
+        }
+    )
+
+    func restoreInventoryProtection() throws { try inventoryService.restoreProtection() }
+    func reconcileInventoryProtection() throws { try inventoryService.reconcileInterfaces() }
+
+    func updateInventoryRouting(request data: Data, reply: @escaping (Bool, String?) -> Void) {
+        guard data.count <= 8 * 1024 * 1024 else { reply(false, "Inventory request is too large"); return }
+        Self.inventoryQueue.async {
+            do {
+                let request = try JSONDecoder().decode(InventoryRoutingRequest.self, from: data)
+                guard request.action != .apply || Self.inventoryMonitoringAvailable else {
+                    throw InventoryError.operation("Inventory interface monitoring is unavailable; restart the helper before connecting")
+                }
+                try self.inventoryService.perform(request, uid: uid_t(self.clientUser.uid))
+                reply(true, nil)
+            } catch { reply(false, error.localizedDescription) }
+        }
+    }
+
+    private func inventoryInterface(_ request: InventoryRoutingRequest) throws -> InventoryLiveInterface {
+        guard let config = validatedRuntimeConfig(named: request.configName, allowLegacy: false) else { throw InventoryError.staleOperation }
+        let metadata = try sanitizedMetadata(from: Data(contentsOf: config))
+        guard metadata.localPublicKey == request.localPublicKey, metadata.publicKey == request.peerPublicKey else {
+            throw InventoryError.staleOperation
+        }
+        func transport(_ endpoint: String, interface: String) throws -> InventoryLiveInterface {
+            guard let colon = endpoint.lastIndex(of: ":"),
+                  let port = Int(endpoint[endpoint.index(after: colon)...]), (1...65535).contains(port) else {
+                throw InventoryError.staleOperation
+            }
+            let host = String(endpoint[..<colon]).trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+            var hints = addrinfo(), result: UnsafeMutablePointer<addrinfo>?
+            hints.ai_family = AF_UNSPEC; hints.ai_socktype = SOCK_DGRAM
+            guard getaddrinfo(host, nil, &hints, &result) == 0, let first = result else { throw InventoryError.staleOperation }
+            defer { freeaddrinfo(result) }
+            var buffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            guard getnameinfo(first.pointee.ai_addr, first.pointee.ai_addrlen, &buffer, socklen_t(buffer.count), nil, 0, NI_NUMERICHOST) == 0 else {
+                throw InventoryError.staleOperation
+            }
+            let literal = String(cString: buffer)
+            guard Self.isValidIPLiteral(literal) else { throw InventoryError.staleOperation }
+            return InventoryLiveInterface(name: interface, endpointHost: literal, endpointPort: port)
+        }
+        let alias = URL(fileURLWithPath: "/var/run/wireguard").appendingPathComponent(
+            config.deletingPathExtension().lastPathComponent + ".name")
+        if !fileManager.fileExists(atPath: alias.path), let endpoint = metadata.endpoint {
+            return try transport(endpoint, interface: "")
+        }
+        try validateRegularFile(alias, expectedSize: nil)
+        try validateRootOwnedFile(alias)
+        let interface = try String(contentsOf: alias, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard Self.isValidInterfaceName(interface) else { throw InventoryError.staleOperation }
+        let wg = try verifiedInstalledWg()
+        let key = runCommand(executable: wg, arguments: ["show", interface, "public-key"])
+        guard key.exitCode == 0, key.stdout.trimmingCharacters(in: .whitespacesAndNewlines) == request.localPublicKey else {
+            throw InventoryError.staleOperation
+        }
+        let endpoints = runCommand(executable: wg, arguments: ["show", interface, "endpoints"])
+        guard endpoints.exitCode == 0,
+              let line = endpoints.stdout.split(separator: "\n").first(where: { $0.hasPrefix(request.peerPublicKey + "\t") }),
+              let endpoint = line.split(separator: "\t").last else { throw InventoryError.staleOperation }
+        var live = try transport(String(endpoint), interface: interface)
+        live.index = if_nametoindex(interface)
+        guard live.index > 0 else { throw InventoryError.staleOperation }
+        return live
+    }
 
     init(clientBundleURL: URL, clientUser: ClientUser) {
         self.clientBundleURL = clientBundleURL
@@ -717,7 +818,8 @@ private final class HelperSession: NSObject, WireguardHelperProtocol {
         }
     }
 
-    private static let killSwitchAnchor = "com.fmdigitech.wiretunnels.killswitch"
+    private static let killSwitchAnchor = InventoryRoutingService.killSwitchAnchor
+    private static let legacyKillSwitchAnchor = "com.fmdigitech.wiretunnels.killswitch"
 
     /// Loads (or, for an empty list, flushes) PF pass-through rules for the given
     /// tunnel interfaces/endpoints into a single dedicated anchor. Never disables
@@ -751,20 +853,16 @@ private final class HelperSession: NSObject, WireguardHelperProtocol {
 
         guard !decoded.isEmpty else {
             let result = runCommand(executable: pfctl, arguments: ["-a", Self.killSwitchAnchor, "-F", "all"])
-            if result.exitCode == 0 {
+            let legacy = runCommand(executable: pfctl, arguments: ["-a", Self.legacyKillSwitchAnchor, "-F", "all"])
+            if result.exitCode == 0 && legacy.exitCode == 0 {
                 reply(true, nil)
             } else {
-                reply(false, commandError(result, fallback: "Unable to clear kill switch rules"))
+                reply(false, "Unable to clear kill switch rules")
             }
             return
         }
 
-        var lines = ["block drop all", "pass quick on lo0 all"]
-        for entry in decoded {
-            lines.append("pass quick on \(entry.interfaceName) all")
-            lines.append("pass out quick proto udp from any to \(entry.endpointHost) port \(entry.endpointPort)")
-        }
-        let rulesText = lines.joined(separator: "\n") + "\n"
+        let rulesText = KillSwitchEntry.rules(for: decoded)
 
         let loadResult = runCommand(
             executable: pfctl,
@@ -782,6 +880,13 @@ private final class HelperSession: NSObject, WireguardHelperProtocol {
         let alreadyEnabled = (enableResult.stdout + enableResult.stderr).contains("pf already enabled")
         guard enableResult.exitCode == 0 || alreadyEnabled else {
             reply(false, commandError(enableResult, fallback: "Unable to enable packet filter"))
+            return
+        }
+
+        // Replace the old anchor only after its replacement has loaded.
+        let legacy = runCommand(executable: pfctl, arguments: ["-a", Self.legacyKillSwitchAnchor, "-F", "all"])
+        guard legacy.exitCode == 0 else {
+            reply(false, commandError(legacy, fallback: "Unable to clear legacy kill switch rules"))
             return
         }
 

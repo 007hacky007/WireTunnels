@@ -28,20 +28,24 @@ final class TunnelManager: ObservableObject, TunnelShutdownClient {
     @Published var hopChains: [HopChain] = []
     @Published var systemSettings = SystemSettings()
     @Published private(set) var connectionFeedback = TunnelConnectionFeedback()
+    @Published var refreshingInventories: Set<UUID> = []
+    @Published var inventoryErrors: [UUID: String] = [:]
+    var inventoryGenerations: [UUID: UUID] = [:]
+    var inventoryTasks: [UUID: Task<[String], Error>] = [:]
     let currentUserIsAdministrator = TunnelManager.currentUserIsAdministrator()
 
     private var trafficSnapshots: [UUID: (rx: Int64, tx: Int64, time: Date)] = [:]
     private let maxTrafficSamples = 20
 
-    let commandService = WireGuardCommandService()
-    let networkMonitor = NetworkMonitorService()
-    private let repository = TunnelRepository()
+    let commandService: WireGuardCommandService
+    let networkMonitor: NetworkMonitorService
+    private let repository: TunnelRepository
     private let hopChainRepository = HopChainRepository()
-    private let configStorage = ConfigStorageService()
+    private let configStorage: ConfigStorageService
     private let parser = WireGuardConfigParser()
     private let toolLocator = WireGuardToolLocator()
-    private let log = LogService.shared
-    private let notificationService = NotificationService.shared
+    private let log: LogService
+    private let notificationService: NotificationService
     private let resetService = AppDataResetService.shared
     private lazy var statusMonitor = StatusMonitorService(commandService: commandService)
     private var pollingTask: Task<Void, Never>?
@@ -56,7 +60,10 @@ final class TunnelManager: ObservableObject, TunnelShutdownClient {
     private var pollingInProgress = false
     private var networkSettingsOperations = 0
     private var disconnectingTunnels: Set<UUID> = []
-    private var connectingTunnels: Set<UUID> = []
+
+    /// True while a connect, a disconnect or an inventory change runs for the tunnel.
+    func isTunnelBusy(_ id: UUID) -> Bool { connectingTunnels.contains(id) || disconnectingTunnels.contains(id) }
+    var connectingTunnels: Set<UUID> = []
     private var connectingChains: Set<UUID> = []
     private var statusFailureReported = false
     /// Raw managed-tunnel snapshot from the last successful `loadManagedTunnels()`
@@ -79,11 +86,21 @@ final class TunnelManager: ObservableObject, TunnelShutdownClient {
 
     // MARK: - Initialization
 
-    init() {
+    init(commandService: WireGuardCommandService? = nil, networkMonitor: NetworkMonitorService? = nil,
+         repository: TunnelRepository? = nil, configStorage: ConfigStorageService? = nil,
+         log: LogService? = nil, notificationService: NotificationService? = nil,
+         automaticallyInitialize: Bool = true) {
+        self.commandService = commandService ?? WireGuardCommandService()
+        self.networkMonitor = networkMonitor ?? NetworkMonitorService()
+        self.repository = repository ?? TunnelRepository()
+        self.configStorage = configStorage ?? ConfigStorageService()
+        self.log = log ?? .shared
+        self.notificationService = notificationService ?? .shared
+        guard automaticallyInitialize else { return }
         // Relay networkMonitor changes so views observing TunnelManager redraw on network state changes
-        networkCancellable = networkMonitor.objectWillChange
+        networkCancellable = self.networkMonitor.objectWillChange
             .sink { [weak self] in self?.objectWillChange.send() }
-        networkMonitor.onNetworkChange = { [weak self] in
+        self.networkMonitor.onNetworkChange = { [weak self] in
             // Debounce: NWPathMonitor fires multiple times per real network change
             // (e.g. wireguard-go creating a utun triggers another path update).
             // Wait 500 ms before acting so only the final stable state matters.
@@ -94,10 +111,10 @@ final class TunnelManager: ObservableObject, TunnelShutdownClient {
                 await self?.handleNetworkChange()
             }
         }
-        networkMonitor.onSystemWake = { [weak self] in
+        self.networkMonitor.onSystemWake = { [weak self] in
             await self?.handleSystemWake()
         }
-        networkMonitor.onLocalAddressChange = { [weak self] in
+        self.networkMonitor.onLocalAddressChange = { [weak self] in
             // Same debounce reasoning as onNetworkChange above — coalesce the
             // handful of path updates a single DHCP renewal tends to produce.
             self?.localAddressChangeDebounceTask?.cancel()
@@ -264,6 +281,16 @@ final class TunnelManager: ObservableObject, TunnelShutdownClient {
             errorMessage = nil
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             await refreshStatus(reportError: false)
+        }
+
+        for tunnel in tunnels where tunnel.inventoryCommand != nil {
+            do {
+                try await protectInventory(tunnel)
+                if tunnel.isActive {
+                    try await applyCachedInventory(tunnel)
+                    Task { await self.refreshInventory(for: tunnel) }
+                }
+            } catch { inventoryErrors[tunnel.id] = error.localizedDescription }
         }
 
         // Flush any stale kill-switch PF state left over from a previous crash or
@@ -610,6 +637,9 @@ final class TunnelManager: ObservableObject, TunnelShutdownClient {
                 }
                 stagedRuntimePath = runtimePath
             }
+            if liveTunnel.inventoryCommand != nil {
+                try await protectInventory(liveTunnel)
+            }
             try await log.timed("Connect \(liveTunnel.name): starting WireGuard") {
                 try await self.commandService.startTunnel(configPath: stagedRuntimePath)
             }
@@ -621,6 +651,7 @@ final class TunnelManager: ObservableObject, TunnelShutdownClient {
                 }
             }
 
+            guard let index = tunnels.firstIndex(where: { $0.id == liveTunnel.id }) else { throw InventoryError.staleOperation }
             tunnels[index].isActive = true
             tunnels[index].connectedAt = Date()
             tunnels[index].runtimeConfigPath = stagedRuntimePath
@@ -632,13 +663,17 @@ final class TunnelManager: ObservableObject, TunnelShutdownClient {
             let statusConfirmed = await log.timed("Connect \(liveTunnel.name): confirming runtime status") {
                 await self.refreshStatus(reportError: !isAutoConnect)
             }
-            if tunnels[index].isKillSwitchEnabled {
-                await armKillSwitch(for: tunnels[index])
+            if let current = tunnels.first(where: { $0.id == liveTunnel.id }), current.isKillSwitchEnabled {
+                await armKillSwitch(for: current)
             }
-            if !tunnels[index].excludedRoutes.isEmpty {
-                await syncExcludedRoutes(for: tunnels[index])
+            if let current = tunnels.first(where: { $0.id == liveTunnel.id }), !current.excludedRoutes.isEmpty {
+                await syncExcludedRoutes(for: current)
             }
             await syncSplitDNSState()
+            if liveTunnel.inventoryCommand != nil {
+                try await applyCachedInventory(liveTunnel)
+                Task { await self.refreshInventory(for: liveTunnel) }
+            }
             connectionFeedback.completeConnection(liveTunnel.id, isActive: statusConfirmed && tunnels[index].isActive)
             if !statusConfirmed || !tunnels[index].isActive {
                 log.warning("Tunnel \(liveTunnel.name): startup completed but runtime connection is unconfirmed")
@@ -677,6 +712,7 @@ final class TunnelManager: ObservableObject, TunnelShutdownClient {
         log.info("Disconnect \(liveTunnel.name): runtime config=\(URL(fileURLWithPath: configPath).lastPathComponent), interface=\(liveTunnel.interfaceName ?? "unknown")")
 
         do {
+            if liveTunnel.inventoryCommand != nil { try await protectInventory(liveTunnel) }
             if liveTunnel.scope == .managed,
                liveTunnel.managedPolicy?.usersCanDisconnect == false {
                 throw CommandError.managedTunnelFailed("Users are not allowed to disconnect this managed tunnel")
@@ -695,6 +731,7 @@ final class TunnelManager: ObservableObject, TunnelShutdownClient {
                     log.warning("Unable to clear connected user for \(liveTunnel.name): \(error.localizedDescription)")
                 }
             }
+            guard let index = tunnels.firstIndex(where: { $0.id == liveTunnel.id }) else { throw InventoryError.staleOperation }
             tunnels[index].isActive = false
             tunnels[index].connectedAt = nil
             tunnels[index].runtimeConfigPath = nil
@@ -785,10 +822,14 @@ final class TunnelManager: ObservableObject, TunnelShutdownClient {
     }
 
     func makeTunnelShared(_ tunnel: Tunnel) async throws {
+        guard !isTunnelBusy(tunnel.id) else { throw InventoryError.staleOperation }
         guard let liveTunnel = tunnels.first(where: { $0.id == tunnel.id }),
               liveTunnel.scope == .personal else { return }
         guard !liveTunnel.isActive else {
             throw CommandError.managedTunnelFailed("Disconnect this tunnel before making it shared")
+        }
+        guard liveTunnel.inventoryCommand == nil else {
+            throw InventoryError.operation("Disable the personal inventory command before making this tunnel shared")
         }
         let configURL = URL(fileURLWithPath: liveTunnel.configPath)
         let contents = try Data(contentsOf: configURL, options: .mappedIfSafe)
@@ -836,8 +877,12 @@ final class TunnelManager: ObservableObject, TunnelShutdownClient {
     }
 
     func updateTunnel(_ tunnel: Tunnel, name: String, configContent: String) async throws {
+        guard !isTunnelBusy(tunnel.id) else { throw InventoryError.staleOperation }
         guard let index = tunnels.firstIndex(where: { $0.id == tunnel.id }) else { return }
         let liveTunnel = tunnels[index]
+        guard liveTunnel.inventoryCommand == nil else {
+            throw InventoryError.operation("Disable inventory protection before editing this tunnel's configuration")
+        }
         let parsed = parser.parse(string: configContent)
         guard parsed.isValid else {
             throw ConfigManagementError.invalidConfiguration(parsed.validationErrors)
@@ -903,8 +948,12 @@ final class TunnelManager: ObservableObject, TunnelShutdownClient {
     func deleteTunnel(_ tunnel: Tunnel) {
         guard let liveTunnel = tunnels.first(where: { $0.id == tunnel.id }) else { return }
         guard liveTunnel.scope == .personal else { return }
-        guard !liveTunnel.isActive, !connectingTunnels.contains(liveTunnel.id) else {
+        guard !liveTunnel.isActive, !isTunnelBusy(liveTunnel.id) else {
             errorMessage = "Disconnect \(liveTunnel.name) before deleting it."
+            return
+        }
+        guard liveTunnel.inventoryCommand == nil else {
+            errorMessage = "Disable inventory protection before deleting this tunnel."
             return
         }
         let updatedTunnels = tunnels.filter { $0.id != tunnel.id }
@@ -978,6 +1027,7 @@ final class TunnelManager: ObservableObject, TunnelShutdownClient {
 
     @discardableResult
     func refreshStatus(reportError: Bool = true) async -> Bool {
+        let previouslyActiveInventory = Set(tunnels.filter { $0.isActive && $0.inventoryCommand != nil }.map(\.id))
         guard await statusMonitor.refresh() else {
             let detail = statusMonitor.lastErrorDescription ?? "Unknown status error"
             guard reportError else {
@@ -1095,6 +1145,10 @@ final class TunnelManager: ObservableObject, TunnelShutdownClient {
         }
         if updatedTunnels != tunnels {
             tunnels = updatedTunnels
+        }
+        for tunnel in tunnels where !tunnel.isActive && previouslyActiveInventory.contains(tunnel.id) {
+            do { try await protectInventory(tunnel) }
+            catch { inventoryErrors[tunnel.id] = error.localizedDescription }
         }
         updateWarnings()
         // A tunnel that dropped (or came back) outside our control must not leave its
@@ -1286,6 +1340,13 @@ final class TunnelManager: ObservableObject, TunnelShutdownClient {
         for tunnel in tunnels where tunnel.isActive && tunnel.isKillSwitchEnabled && isInScope(tunnel.id) {
             await armKillSwitch(for: tunnel)
         }
+        for tunnel in tunnels where tunnel.isActive && tunnel.inventoryCommand != nil && isInScope(tunnel.id) {
+            do {
+                try await protectInventory(tunnel)
+                try await applyCachedInventory(tunnel)
+                Task { await self.refreshInventory(for: tunnel) }
+            } catch { inventoryErrors[tunnel.id] = error.localizedDescription }
+        }
         // Re-derive exclusion routes too — the default gateway/interface can
         // change across the restart just like the kill switch's interface/endpoint.
         for tunnel in tunnels where tunnel.isActive && !tunnel.excludedRoutes.isEmpty && isInScope(tunnel.id) {
@@ -1357,6 +1418,7 @@ final class TunnelManager: ObservableObject, TunnelShutdownClient {
         let configPath = liveTunnel.runtimeConfigPath ?? liveTunnel.configPath
         log.info("Wake reconnect: restarting \(liveTunnel.name)")
         do {
+            if liveTunnel.inventoryCommand != nil { try await protectInventory(liveTunnel) }
             try await commandService.stopTunnel(configPath: configPath)
             guard !isShuttingDown else { return }
             try await commandService.startTunnel(configPath: configPath)
@@ -1681,8 +1743,16 @@ final class TunnelManager: ObservableObject, TunnelShutdownClient {
     /// Sets the tunnel's excluded-CIDR list and, if it's currently connected,
     /// immediately re-syncs the privileged routes to match.
     func updateExcludedRoutes(for tunnel: Tunnel, routes: [String]) {
+        guard !isTunnelBusy(tunnel.id) else {
+            errorMessage = "Wait for the tunnel operation to finish before changing bypass routes."
+            return
+        }
         guard let index = tunnels.firstIndex(where: { $0.id == tunnel.id }) else { return }
         guard tunnels[index].scope == .personal else { return }
+        guard tunnels[index].inventoryCommand == nil || routes.isEmpty else {
+            errorMessage = "Inventory-protected tunnels cannot use bypass routes."
+            return
+        }
         tunnels[index].excludedRoutes = routes
         tunnels[index].updatedAt = Date()
         savePersonalTunnelsOnly()
@@ -1785,7 +1855,15 @@ final class TunnelManager: ObservableObject, TunnelShutdownClient {
     }
 
     func addHopChain(hopTunnelID: UUID, exitTunnelID: UUID) {
+        guard !isTunnelBusy(hopTunnelID), !isTunnelBusy(exitTunnelID) else {
+            errorMessage = "Wait for the tunnel operations to finish before adding a hop chain."
+            return
+        }
         guard hopTunnelID != exitTunnelID else { return }
+        guard !tunnels.contains(where: { ($0.id == hopTunnelID || $0.id == exitTunnelID) && $0.inventoryCommand != nil }) else {
+            errorMessage = "Inventory protection cannot be combined with hop chains."
+            return
+        }
         guard chain(containing: hopTunnelID) == nil, chain(containing: exitTunnelID) == nil else {
             errorMessage = "One of these tunnels is already part of another multi-hop chain."
             return
@@ -2051,6 +2129,11 @@ final class TunnelManager: ObservableObject, TunnelShutdownClient {
         catch { reportStorageIssue("Unable to save tunnel metadata: \(error.localizedDescription)") }
     }
 
+    /// Like `savePersonalTunnelsOnly`, but reports failure so inventory changes can roll back.
+    func saveInventoryTunnels() throws {
+        try persistPersonalTunnels(tunnels)
+    }
+
     private func saveHopChains(_ updated: [HopChain]) {
         do {
             try hopChainRepository.save(updated)
@@ -2277,6 +2360,12 @@ final class TunnelManager: ObservableObject, TunnelShutdownClient {
 
         do {
             let managed = tunnels.filter { $0.scope == .managed }
+            if tunnels.contains(where: { $0.inventoryCommand != nil }) {
+                guard stopFailures.isEmpty else { throw InventoryError.operation("Disconnect all inventory tunnels before resetting app data") }
+                for tunnel in tunnels where tunnel.inventoryCommand != nil {
+                    try await updateInventoryCommand(for: tunnel, command: nil)
+                }
+            }
             try resetService.reset()
             tunnels = managed
             activeWarnings = []
