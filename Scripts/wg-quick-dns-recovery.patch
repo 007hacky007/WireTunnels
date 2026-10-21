@@ -1,0 +1,36 @@
+--- wg-quick
++++ wg-quick
+@@ -400,6 +400,21 @@
+ }
+ 
+ set_dns() {
++	if [[ -n ${WIRETUNNELS_DNS_HELPER:-} ]]; then
++		local service
++		[[ -n ${WIRETUNNELS_DNS_TOKEN:-} ]] || return 1
++		# Capture socket identity once; inherited monitors must not adopt a reused utun.
++		if [[ -z ${WIRETUNNELS_DNS_SOCKET_ID:-} ]]; then
++			WIRETUNNELS_DNS_SOCKET_ID="$(stat -f '%d:%i' "/var/run/wireguard/$REAL_INTERFACE.sock")" || return $?
++		fi
++		collect_active_dns_services
++		{ read -r _ && while read -r service; do
++			[[ $service == "*"* ]] && service="${service:1}"
++			service_active_for_dns "$service" || continue
++			cmd "$WIRETUNNELS_DNS_HELPER" --dns-set "$WIRETUNNELS_DNS_TOKEN" "$INTERFACE" "$REAL_INTERFACE" "$WIRETUNNELS_DNS_SOCKET_ID" "$service" "${#DNS[@]}" "${DNS[@]}" "${#DNS_SEARCH[@]}" "${DNS_SEARCH[@]}" || return $?
++		done; } < <(cmd networksetup -listallnetworkservices)
++		return 0
++	fi
+ 	collect_new_service_dns
+ 	[[ $DNS_STATE_SAVED -eq 1 ]] || save_dns_state
+ 	local service response i
+@@ -420,6 +435,11 @@
+ }
+ 
+ del_dns() {
++	if [[ -n ${WIRETUNNELS_DNS_HELPER:-} ]]; then
++		[[ -n ${WIRETUNNELS_DNS_TOKEN:-} ]] || return 1
++		cmd "$WIRETUNNELS_DNS_HELPER" --dns-release "$WIRETUNNELS_DNS_TOKEN"
++		return $?
++	fi
+ 	local service response i
+ 	[[ $DNS_STATE_SAVED -eq 1 ]] || load_dns_state || return 0
+ 	for ((i = 0; i < ${#SERVICE_NAMES[@]}; ++i)); do

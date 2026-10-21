@@ -1,0 +1,90 @@
+--- wg-quick
++++ wg-quick
+@@ -219,6 +219,44 @@
+ SERVICE_NAMES=( )
+ SERVICE_DNS=( )
+ SERVICE_DNS_SEARCH=( )
++DNS_STATE_DIR=""
++DNS_STATE_SAVED=0
++
++set_dns_state_dir() {
++	DNS_STATE_DIR="/var/run/wireguard/$INTERFACE.dns"
++}
++
++save_dns_state() {
++	local i
++	set_dns_state_dir
++	rm -rf "$DNS_STATE_DIR"
++	mkdir -p "$DNS_STATE_DIR"
++	chmod 700 "$DNS_STATE_DIR"
++	for ((i = 0; i < ${#SERVICE_NAMES[@]}; ++i)); do
++		printf '%s' "${SERVICE_NAMES[$i]}" > "$DNS_STATE_DIR/$i.service"
++		printf '%s' "${SERVICE_DNS[$i]}" > "$DNS_STATE_DIR/$i.dns"
++		printf '%s' "${SERVICE_DNS_SEARCH[$i]}" > "$DNS_STATE_DIR/$i.search"
++	done
++	DNS_STATE_SAVED=1
++}
++
++load_dns_state() {
++	local i=0
++	set_dns_state_dir
++	[[ -d $DNS_STATE_DIR ]] || return 1
++	SERVICE_NAMES=( )
++	SERVICE_DNS=( )
++	SERVICE_DNS_SEARCH=( )
++	while [[ -f "$DNS_STATE_DIR/$i.service" ]]; do
++		SERVICE_NAMES+=( "$(< "$DNS_STATE_DIR/$i.service")" )
++		SERVICE_DNS+=( "$(< "$DNS_STATE_DIR/$i.dns")" )
++		SERVICE_DNS_SEARCH+=( "$(< "$DNS_STATE_DIR/$i.search")" )
++		((++i))
++	done
++	[[ $i -gt 0 ]] || return 1
++	DNS_STATE_SAVED=1
++}
++
+ collect_new_service_dns() {
+ 	local service get_response i service_index
+ 	local found_services=( )
+@@ -310,6 +348,7 @@
+ 
+ set_dns() {
+ 	collect_new_service_dns
++	[[ $DNS_STATE_SAVED -eq 1 ]] || save_dns_state
+ 	local service response i
+ 	for ((i = 0; i < ${#SERVICE_NAMES[@]}; ++i)); do
+ 		service=${SERVICE_NAMES[$i]}
+@@ -328,6 +367,7 @@
+ 
+ del_dns() {
+ 	local service response i
++	[[ $DNS_STATE_SAVED -eq 1 ]] || load_dns_state || return 0
+ 	for ((i = 0; i < ${#SERVICE_NAMES[@]}; ++i)); do
+ 		service=${SERVICE_NAMES[$i]}
+ 		while read -r response; do
+@@ -337,6 +377,9 @@
+ 			cmd networksetup -setsearchdomains "$service" ${SERVICE_DNS_SEARCH[$i]} || true
+ 		)
+ 	done
++	set_dns_state_dir
++	rm -rf "$DNS_STATE_DIR"
++	DNS_STATE_SAVED=0
+ }
+ 
+ monitor_daemon() {
+@@ -469,7 +512,7 @@
+ cmd_up() {
+ 	local i
+ 	get_real_interface && die "\`$INTERFACE' already exists as \`$REAL_INTERFACE'"
+-	trap 'del_if; del_routes; exit' INT TERM EXIT
++	trap 'del_if; del_routes; del_dns; exit' INT TERM EXIT
+ 	add_if
+ 	execute_hooks "${PRE_UP[@]}"
+ 	set_config
+@@ -495,6 +538,7 @@
+ 	execute_hooks "${PRE_DOWN[@]}"
+ 	[[ $SAVE_CONFIG -eq 0 ]] || save_config
+ 	del_if
++	[[ ${#DNS[@]} -eq 0 ]] || del_dns
+ 	execute_hooks "${POST_DOWN[@]}"
+ }
+ 

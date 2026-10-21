@@ -1,0 +1,119 @@
+--- darwin.bash
++++ darwin.bash
+@@ -39,7 +39,7 @@
+ 	exit 1
+ }
+ 
+-[[ ${BASH_VERSINFO[0]} -ge 4 ]] || die "Version mismatch: bash ${BASH_VERSINFO[0]} detected, when bash 4+ required"
++[[ ${BASH_VERSINFO[0]} -ge 3 ]] || die "Version mismatch: bash ${BASH_VERSINFO[0]} detected, when bash 3+ required"
+ 
+ auto_su() {
+ 	[[ $UID == 0 ]] || exec sudo -p "$PROGRAM must be run as root. Please enter the password for %u to continue: " -- "$BASH" -- "$SELF" "${ARGS[@]}"
+@@ -216,29 +216,45 @@
+ 	done < <(wg show "$REAL_INTERFACE" endpoints)
+ }
+ 
+-declare -A SERVICE_DNS
+-declare -A SERVICE_DNS_SEARCH
++SERVICE_NAMES=( )
++SERVICE_DNS=( )
++SERVICE_DNS_SEARCH=( )
+ collect_new_service_dns() {
+-	local service get_response
+-	local -A found_services
++	local service get_response i service_index
++	local found_services=( )
++	local retained_names=( ) retained_dns=( ) retained_search=( )
+ 	{ read -r _ && while read -r service; do
+ 		[[ $service == "*"* ]] && service="${service:1}"
+-		found_services["$service"]=1
+-		[[ -n ${SERVICE_DNS["$service"]} ]] && continue
++		found_services+=( "$service" )
++		service_index=-1
++		for ((i = 0; i < ${#SERVICE_NAMES[@]}; ++i)); do
++			if [[ ${SERVICE_NAMES[$i]} == "$service" ]]; then
++				service_index=$i
++				break
++			fi
++		done
++		[[ $service_index -ge 0 ]] && continue
+ 		get_response="$(cmd networksetup -getdnsservers "$service")"
+ 		[[ $get_response == *" "* ]] && get_response="Empty"
+-		[[ -n $get_response ]] && SERVICE_DNS["$service"]="$get_response"
++		[[ -n $get_response ]] || continue
++		SERVICE_NAMES+=( "$service" )
++		SERVICE_DNS+=( "$get_response" )
+ 		get_response="$(cmd networksetup -getsearchdomains "$service")"
+ 		[[ $get_response == *" "* ]] && get_response="Empty"
+-		[[ -n $get_response ]] && SERVICE_DNS_SEARCH["$service"]="$get_response"
++		SERVICE_DNS_SEARCH+=( "${get_response:-Empty}" )
+ 	done; } < <(networksetup -listallnetworkservices)
+ 
+-	for service in "${!SERVICE_DNS[@]}"; do
+-		if ! [[ -n ${found_services["$service"]} ]]; then
+-			unset SERVICE_DNS["$service"]
+-			unset SERVICE_DNS_SEARCH["$service"]
++	for ((i = 0; i < ${#SERVICE_NAMES[@]}; ++i)); do
++		service=${SERVICE_NAMES[$i]}
++		if [[ " ${found_services[*]} " == *" $service "* ]]; then
++			retained_names+=( "$service" )
++			retained_dns+=( "${SERVICE_DNS[$i]}" )
++			retained_search+=( "${SERVICE_DNS_SEARCH[$i]}" )
+ 		fi
+ 	done
++	SERVICE_NAMES=( "${retained_names[@]}" )
++	SERVICE_DNS=( "${retained_dns[@]}" )
++	SERVICE_DNS_SEARCH=( "${retained_search[@]}" )
+ }
+ 
+ set_endpoint_direct_route() {
+@@ -295,8 +311,9 @@
+ 
+ set_dns() {
+ 	collect_new_service_dns
+-	local service response
+-	for service in "${!SERVICE_DNS[@]}"; do
++	local service response i
++	for ((i = 0; i < ${#SERVICE_NAMES[@]}; ++i)); do
++		service=${SERVICE_NAMES[$i]}
+ 		while read -r response; do
+ 			[[ $response == *Error* ]] && echo "$response" >&2
+ 		done < <(
+@@ -312,13 +329,14 @@
+ }
+ 
+ del_dns() {
+-	local service response
+-	for service in "${!SERVICE_DNS[@]}"; do
++	local service response i
++	for ((i = 0; i < ${#SERVICE_NAMES[@]}; ++i)); do
++		service=${SERVICE_NAMES[$i]}
+ 		while read -r response; do
+ 			[[ $response == *Error* ]] && echo "$response" >&2
+ 		done < <(
+-			cmd networksetup -setdnsservers "$service" ${SERVICE_DNS["$service"]} || true
+-			cmd networksetup -setsearchdomains "$service" ${SERVICE_DNS_SEARCH["$service"]} || true
++			cmd networksetup -setdnsservers "$service" ${SERVICE_DNS[$i]} || true
++			cmd networksetup -setsearchdomains "$service" ${SERVICE_DNS_SEARCH[$i]} || true
+ 		)
+ 	done
+ }
+@@ -326,8 +344,7 @@
+ 	(trap 'del_routes; del_dns; exit 0' INT TERM EXIT
+ 	exec >/dev/null 2>&1
+ 	exec 19< <(exec route -n monitor)
+-	local event bpid=$BASHPID mpid=$!
+-	[[ ${#DNS[@]} -gt 0 ]] && trap set_dns ALRM
++	local event mpid=$!
+ 	# TODO: this should also check to see if the endpoint actually changes
+ 	# in response to incoming packets, and then call set_endpoint_direct_route
+ 	# then too. That function should be able to gracefully cleanup if the
+@@ -339,7 +356,7 @@
+ 		[[ -z $MTU ]] && set_mtu
+ 		if [[ ${#DNS[@]} -gt 0 ]]; then
+ 			set_dns
+-			sleep 2 && kill -ALRM $bpid 2>/dev/null &
++			sleep 2 && ifconfig "$REAL_INTERFACE" >/dev/null 2>&1 && set_dns
+ 		fi
+ 	done
+ 	kill $mpid) &
