@@ -26,6 +26,7 @@ def main():
                   'WireTunnels/Services/DebugControlServer.swift', 'Tests/DebugControlServerTests.swift'], flags=['-D', 'DEBUG'])
         subprocess.run(['python3', str(ROOT / 'Tests/test_mcp_bridge.py')], check=True)
         run_suite(directory, 'dns-recovery', ['WireTunnelsHelper/DNSRecoveryService.swift', 'Tests/DNSRecoveryTests.swift'])
+        run_suite(directory, 'wireguard-dns', ['WireTunnels/Services/WireGuardConfigParser.swift', 'Tests/WireGuardDNSTests.swift'])
         run_suite(directory, 'kill-switch-rules', ['Shared/KillSwitchEntry.swift', 'Tests/KillSwitchRulesTests.swift'])
         subprocess.run(['bash', str(ROOT / 'Tests/test_inventory_routing.sh')], check=True)
         subprocess.run(['python3', '-m', 'unittest', 'discover', '-s', 'Tests', '-p', 'test_server_ips.py'],

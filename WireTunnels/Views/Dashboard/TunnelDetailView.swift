@@ -169,8 +169,11 @@ struct TunnelDetailView: View {
                     if !live.allowedIPs.isEmpty {
                         DetailRow(label: "Allowed IPs", value: live.allowedIPs.prefix(20).joined(separator: "\n") + (live.allowedIPs.count > 20 ? "\n… \(live.allowedIPs.count) total prefixes" : ""))
                     }
-                    if !live.dns.isEmpty {
-                        DetailRow(label: "DNS", value: live.dns.joined(separator: ", "))
+                    if !WireGuardDNS.servers(live.dns).isEmpty {
+                        DetailRow(label: "DNS", value: WireGuardDNS.servers(live.dns).joined(separator: ", "))
+                    }
+                    if !WireGuardDNS.searchDomains(live.dns).isEmpty {
+                        DetailRow(label: "Search Domains", value: WireGuardDNS.searchDomains(live.dns).joined(separator: ", "))
                     }
                     if let pubKey = live.publicKey, !pubKey.isEmpty {
                         DetailRow(label: "Public Key", value: pubKey, monospace: true)
@@ -754,7 +757,7 @@ struct TunnelDetailView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            if live.dns.isEmpty {
+            if WireGuardDNS.servers(live.dns).isEmpty {
                 Text("This tunnel has no DNS server configured, so there is nothing to route.")
                     .font(.caption)
                     .foregroundStyle(.orange)
@@ -1110,6 +1113,7 @@ private struct ConfigEditorSheetView: View {
     @State private var privateKey: String = ""
     @State private var address: String = ""
     @State private var dns: String = ""
+    @State private var searchDomains: String = ""
     @State private var peerPublicKey: String = ""
     @State private var presharedKey: String = ""
     @State private var endpoint: String = ""
@@ -1122,12 +1126,16 @@ private struct ConfigEditorSheetView: View {
     @State private var isSaving = false
     @State private var error: String? = nil
 
+    private var dnsComposition: (line: String, invalidDomains: [String]) {
+        WireGuardDNS.compose(servers: dns, searchDomains: searchDomains)
+    }
+
     private var generatedConfig: String {
         """
         [Interface]
         PrivateKey = \(privateKey)
         Address = \(address)
-        \(dns.isEmpty ? "" : "DNS = \(dns)\n")
+        \(dnsComposition.line.isEmpty ? "" : "DNS = \(dnsComposition.line)\n")
         [Peer]
         PublicKey = \(peerPublicKey)
         \(presharedKey.isEmpty ? "" : "PresharedKey = \(presharedKey)\n")Endpoint = \(endpoint)
@@ -1144,7 +1152,7 @@ private struct ConfigEditorSheetView: View {
         guard loadingState.canEdit else { return false }
         let name = tunnelName.trimmingCharacters(in: .whitespacesAndNewlines)
         if selectedTab == 0 {
-            return !name.isEmpty && !privateKey.isEmpty && !address.isEmpty
+            return !name.isEmpty && !privateKey.isEmpty && !address.isEmpty && dnsComposition.invalidDomains.isEmpty
         } else {
             return !name.isEmpty && !advancedContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
@@ -1239,6 +1247,18 @@ private struct ConfigEditorSheetView: View {
                             .textFieldStyle(.roundedBorder)
                             .font(.system(.body, design: .monospaced))
                     }
+                    FormRow(label: "Search Domains") {
+                        VStack(alignment: .leading, spacing: 4) {
+                            TextField("office.lan, corp.lan", text: $searchDomains)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.system(.body, design: .monospaced))
+                            if !dnsComposition.invalidDomains.isEmpty {
+                                Text("Not a valid domain: \(dnsComposition.invalidDomains.joined(separator: ", "))")
+                                    .font(.caption)
+                                    .foregroundStyle(.red)
+                            }
+                        }
+                    }
                 }
                 FormSection(title: "Peer") {
                     FormRow(label: "Public Key") {
@@ -1304,7 +1324,8 @@ private struct ConfigEditorSheetView: View {
         let parsed = WireGuardConfigParser().parse(string: advancedContent)
         privateKey = parsed.privateKey ?? ""
         address = parsed.address.joined(separator: ", ")
-        dns = parsed.dns.joined(separator: ", ")
+        dns = WireGuardDNS.servers(parsed.dns).joined(separator: ", ")
+        searchDomains = WireGuardDNS.searchDomains(parsed.dns).joined(separator: ", ")
         peerPublicKey = parsed.peerPublicKey ?? ""
         presharedKey = parsed.presharedKey ?? ""
         endpoint = parsed.endpoint ?? ""

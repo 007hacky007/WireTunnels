@@ -1,6 +1,47 @@
 import CryptoKit
 import Foundation
 
+/// wg-quick treats a `DNS =` entry that is not an IP address as a search domain
+/// (set while the tunnel is up, restored on disconnect), so the app mirrors that rule.
+nonisolated enum WireGuardDNS {
+    static func isAddress(_ value: String) -> Bool {
+        value.range(of: "^[0-9.]+$", options: .regularExpression) != nil || value.contains(":")
+    }
+
+    static func servers(_ entries: [String]) -> [String] { entries.filter(isAddress) }
+
+    static func searchDomains(_ entries: [String]) -> [String] { entries.filter { !isAddress($0) } }
+
+    /// Lower-cased domain without a wildcard or dots at the ends, or nil when it is not a valid name.
+    static func normalizedDomain(_ raw: String) -> String? {
+        var domain = raw.trimmingCharacters(in: .whitespaces).lowercased()
+        if domain.hasPrefix("*.") { domain.removeFirst(2) }
+        while domain.hasPrefix(".") { domain.removeFirst() }
+        while domain.hasSuffix(".") { domain.removeLast() }
+        let labels = domain.split(separator: ".", omittingEmptySubsequences: false)
+        guard !domain.isEmpty, domain.utf8.count <= 253,
+              labels.allSatisfy({ label in
+                  !label.isEmpty && label.utf8.count <= 63 && !label.hasPrefix("-") && !label.hasSuffix("-")
+                      && label.unicodeScalars.allSatisfy { CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789-").contains($0) }
+              }) else { return nil }
+        return domain
+    }
+
+    /// The `DNS =` value for the typed servers and search domains. Invalid search domains are
+    /// left out and reported, so a typo can never reach wg-quick.
+    static func compose(servers: String, searchDomains: String) -> (line: String, invalidDomains: [String]) {
+        func entries(_ text: String) -> [String] {
+            text.split { $0 == "," || $0.isWhitespace }.map(String.init)
+        }
+        var seen = Set<String>(), invalid: [String] = [], domains: [String] = []
+        for entry in entries(searchDomains) {
+            guard let domain = normalizedDomain(entry) else { invalid.append(entry); continue }
+            if seen.insert(domain).inserted { domains.append(domain) }
+        }
+        return ((entries(servers) + domains).joined(separator: ", "), invalid)
+    }
+}
+
 enum WireGuardKey {
     /// Derives the base64 WireGuard public key from a base64 private key (X25519).
     static func publicKey(fromPrivateKey privateKey: String) -> String? {

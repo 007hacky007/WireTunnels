@@ -1644,17 +1644,7 @@ final class TunnelManager: ObservableObject, TunnelShutdownClient {
 
     /// Lowercases and strips wildcard/leading-dot decoration; nil when not a valid domain.
     nonisolated static func normalizedSplitDNSDomain(_ raw: String) -> String? {
-        var domain = raw.trimmingCharacters(in: .whitespaces).lowercased()
-        if domain.hasPrefix("*.") { domain.removeFirst(2) }
-        while domain.hasPrefix(".") { domain.removeFirst() }
-        while domain.hasSuffix(".") { domain.removeLast() }
-        let labels = domain.split(separator: ".", omittingEmptySubsequences: false)
-        guard !domain.isEmpty, domain.utf8.count <= 253,
-              labels.allSatisfy({ label in
-                  !label.isEmpty && label.utf8.count <= 63 && !label.hasPrefix("-") && !label.hasSuffix("-")
-                      && label.unicodeScalars.allSatisfy { CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789-").contains($0) }
-              }) else { return nil }
-        return domain
+        WireGuardDNS.normalizedDomain(raw)
     }
 
     private static func normalizedUniqueDomains(_ domains: [String]) -> [String] {
@@ -1724,7 +1714,7 @@ final class TunnelManager: ObservableObject, TunnelShutdownClient {
         defer { networkSettingsOperations -= 1 }
         let entries = tunnels.compactMap { tunnel -> SplitDNSEntry? in
             guard tunnel.isActive, !tunnel.effectiveSplitDNSDomains.isEmpty else { return nil }
-            let servers = tunnel.dns.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            let servers = WireGuardDNS.servers(tunnel.dns).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
             guard !servers.isEmpty else { return nil }
             return SplitDNSEntry(ownerId: tunnel.id.uuidString, domains: tunnel.effectiveSplitDNSDomains, servers: servers)
         }
@@ -2053,9 +2043,9 @@ final class TunnelManager: ObservableObject, TunnelShutdownClient {
             }
         }
 
-        let activeWithDNS = active.filter { !$0.dns.isEmpty }
+        let activeWithDNS = active.filter { !WireGuardDNS.servers($0.dns).isEmpty }
         if activeWithDNS.count > 1 {
-            let dnsSets = activeWithDNS.map { Set($0.dns) }
+            let dnsSets = activeWithDNS.map { Set(WireGuardDNS.servers($0.dns)) }
             if !dnsSets.dropFirst().allSatisfy({ $0 == dnsSets[0] }) {
                 warnings.append(.conflictingDNS(activeWithDNS.map(\.name)))
             }

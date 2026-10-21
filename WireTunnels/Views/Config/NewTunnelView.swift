@@ -12,6 +12,7 @@ struct NewTunnelView: View {
     @State private var privateKey: String = ""
     @State private var address: String = ""
     @State private var dns: String = ""
+    @State private var searchDomains: String = ""
     @State private var peerPublicKey: String = ""
     @State private var presharedKey: String = ""
     @State private var endpoint: String = ""
@@ -30,12 +31,16 @@ struct NewTunnelView: View {
     @State private var isGeneratingKeys = false
     @State private var showPrivateKey = false
 
+    private var dnsComposition: (line: String, invalidDomains: [String]) {
+        WireGuardDNS.compose(servers: dns, searchDomains: searchDomains)
+    }
+
     private var generatedConfig: String {
         """
         [Interface]
         PrivateKey = \(privateKey)
         Address = \(address)
-        \(dns.isEmpty ? "" : "DNS = \(dns)\n")
+        \(dnsComposition.line.isEmpty ? "" : "DNS = \(dnsComposition.line)\n")
         [Peer]
         PublicKey = \(peerPublicKey)
         \(presharedKey.isEmpty ? "" : "PresharedKey = \(presharedKey)\n")Endpoint = \(endpoint)
@@ -51,7 +56,7 @@ struct NewTunnelView: View {
     private var canSave: Bool {
         let name = tunnelName.trimmingCharacters(in: .whitespacesAndNewlines)
         if selectedTab == 0 {
-            return !name.isEmpty && !privateKey.isEmpty && !address.isEmpty
+            return !name.isEmpty && !privateKey.isEmpty && !address.isEmpty && dnsComposition.invalidDomains.isEmpty
         } else {
             return !name.isEmpty && !advancedContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
@@ -187,6 +192,19 @@ struct NewTunnelView: View {
                         TextField("1.1.1.1", text: $dns)
                             .textFieldStyle(.roundedBorder)
                             .font(.system(.body, design: .monospaced))
+                    }
+
+                    FormRow(label: "Search Domains") {
+                        VStack(alignment: .leading, spacing: 4) {
+                            TextField("office.lan, corp.lan", text: $searchDomains)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.system(.body, design: .monospaced))
+                            if !dnsComposition.invalidDomains.isEmpty {
+                                Text("Not a valid domain: \(dnsComposition.invalidDomains.joined(separator: ", "))")
+                                    .font(.caption)
+                                    .foregroundStyle(.red)
+                            }
+                        }
                     }
                 }
 
