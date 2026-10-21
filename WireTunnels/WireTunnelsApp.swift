@@ -50,6 +50,9 @@ struct WireTunnelsApp: App {
         _tunnelManager = StateObject(wrappedValue: manager)
         _dashboardNavigation = StateObject(wrappedValue: DashboardNavigation())
         AppIntentBridge.tunnelManager = manager
+        #if DEBUG
+        DebugControl.start(manager)
+        #endif
     }
 
     var body: some Scene {

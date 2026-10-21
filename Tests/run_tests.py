@@ -9,10 +9,10 @@ import tempfile
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def run_suite(directory, name, sources, args=()):
+def run_suite(directory, name, sources, args=(), flags=()):
     executable = directory / (name + '-tests')
     subprocess.run([
-        'swiftc', '-module-cache-path', str(directory / 'module-cache'),
+        'swiftc', '-module-cache-path', str(directory / 'module-cache'), *flags,
         *[str(ROOT / source) for source in sources], '-o', str(executable)
     ], check=True)
     subprocess.run([str(executable), *map(str, args)], check=True)
@@ -22,6 +22,9 @@ def main():
     with tempfile.TemporaryDirectory(prefix='wiretunnels-tests-') as temporary:
         directory = Path(temporary)
         status_model = 'WireTunnels/Models/TunnelStatus.swift'
+        run_suite(directory, 'debug-control', ['WireTunnels/Services/AppPaths.swift',
+                  'WireTunnels/Services/DebugControlServer.swift', 'Tests/DebugControlServerTests.swift'], flags=['-D', 'DEBUG'])
+        subprocess.run(['python3', str(ROOT / 'Tests/test_mcp_bridge.py')], check=True)
         run_suite(directory, 'dns-recovery', ['WireTunnelsHelper/DNSRecoveryService.swift', 'Tests/DNSRecoveryTests.swift'])
         run_suite(directory, 'matching', [status_model, 'Tests/TunnelMatchingTests.swift'])
         run_suite(directory, 'commands', ['WireTunnelsHelper/CommandRunner.swift', 'Tests/CommandRunnerTests.swift'])
