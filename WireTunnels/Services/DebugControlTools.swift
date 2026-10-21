@@ -54,7 +54,14 @@ enum DebugControlTools {
                 "toolInstallRequired": manager.toolInstallRequired,
                 "error": orNull(manager.errorMessage),
                 "warnings": manager.activeWarnings.map { String(describing: $0) },
+                "menuBar": manager.menuBarConnectionStatus.description,
+                "tunnelStatus": Dictionary(uniqueKeysWithValues: manager.tunnels.compactMap { tunnel in
+                    manager.connectionStatus(for: tunnel).map { (tunnel.name, $0.description) }
+                }),
             ] as [String: Any]
+        case "clear_error":
+            manager.errorMessage = nil
+            return ["error": NSNull()]
         case "get_log":
             let count = max(1, min(args["lines"] as? Int ?? 100, 1000))
             return Array(LogService.shared.logLines.suffix(count))
@@ -69,7 +76,8 @@ enum DebugControlTools {
         case "connect":
             let tunnel = try find(args, manager)
             manager.errorMessage = nil
-            await manager.connectTunnel(tunnel)
+            // "auto": true exercises the On-Demand path, whose failures must stay passive.
+            await manager.connectTunnel(tunnel, isAutoConnect: args["auto"] as? Bool ?? false)
             return outcome(tunnel.id, manager)
         case "disconnect":
             let tunnel = try find(args, manager)
