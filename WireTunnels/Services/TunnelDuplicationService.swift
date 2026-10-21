@@ -24,7 +24,7 @@ final class TunnelDuplicationService {
                 URL(fileURLWithPath: $0).deletingPathExtension().lastPathComponent.lowercased()
             }
         } + reservedConfigNames.map { $0.lowercased() }))
-        let base = ConfigStorageService.sanitize(name: source.name)
+        let base = ConfigStorageService.displayName(for: source.name)
         var number = 1
         let name: String
         let savedURL: URL
