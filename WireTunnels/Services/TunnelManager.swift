@@ -705,34 +705,7 @@ final class TunnelManager: ObservableObject, TunnelShutdownClient {
                 throw CommandError.managedTunnelFailed("Users are not allowed to disconnect this managed tunnel")
             }
             try await commandService.stopTunnel(configPath: configPath)
-            if killSwitchArmedTunnelIDs.contains(liveTunnel.id) {
-                await disarmKillSwitch(for: liveTunnel)
-            }
-            if !liveTunnel.excludedRoutes.isEmpty {
-                try? await commandService.syncRoutes(ownerId: liveTunnel.id, entries: [])
-            }
-            if liveTunnel.scope == .managed {
-                do {
-                    try await commandService.markManagedTunnelDisconnected(id: liveTunnel.id)
-                } catch {
-                    log.warning("Unable to clear connected user for \(liveTunnel.name): \(error.localizedDescription)")
-                }
-            }
-            guard let index = tunnels.firstIndex(where: { $0.id == liveTunnel.id }) else { throw InventoryError.staleOperation }
-            tunnels[index].isActive = false
-            tunnels[index].connectedAt = nil
-            tunnels[index].runtimeConfigPath = nil
-            tunnels[index].interfaceName = nil
-            tunnels[index].lastHandshake = nil
-            tunnels[index].rxBytes = 0
-            tunnels[index].txBytes = 0
-            tunnels[index].updatedAt = Date()
-            trafficHistory.removeValue(forKey: liveTunnel.id)
-            trafficSnapshots.removeValue(forKey: liveTunnel.id)
-            savePersonalTunnelsOnly()
-            updateWarnings()
-            await syncSplitDNSState()
-            connectionFeedback.disconnected(liveTunnel.id)
+            try await finalizeStoppedTunnel(liveTunnel)
             log.info("Tunnel \(liveTunnel.name) disconnected in \(String(format: "%.3f", ProcessInfo.processInfo.systemUptime - disconnectStarted))s")
             if !isAutoDisconnect && !isShuttingDown {
                 try? await notificationService.postDisconnected(tunnelName: liveTunnel.name)
@@ -745,6 +718,38 @@ final class TunnelManager: ObservableObject, TunnelShutdownClient {
                 automatic: isAutoDisconnect)
             return false
         }
+    }
+
+    /// Completes an intentional stop, including one made during a network restart.
+    private func finalizeStoppedTunnel(_ liveTunnel: Tunnel) async throws {
+        if killSwitchArmedTunnelIDs.contains(liveTunnel.id) {
+            await disarmKillSwitch(for: liveTunnel)
+        }
+        if !liveTunnel.excludedRoutes.isEmpty {
+            try? await commandService.syncRoutes(ownerId: liveTunnel.id, entries: [])
+        }
+        if liveTunnel.scope == .managed {
+            do {
+                try await commandService.markManagedTunnelDisconnected(id: liveTunnel.id)
+            } catch {
+                log.warning("Unable to clear connected user for \(liveTunnel.name): \(error.localizedDescription)")
+            }
+        }
+        guard let index = tunnels.firstIndex(where: { $0.id == liveTunnel.id }) else { throw InventoryError.staleOperation }
+        tunnels[index].isActive = false
+        tunnels[index].connectedAt = nil
+        tunnels[index].runtimeConfigPath = nil
+        tunnels[index].interfaceName = nil
+        tunnels[index].lastHandshake = nil
+        tunnels[index].rxBytes = 0
+        tunnels[index].txBytes = 0
+        tunnels[index].updatedAt = Date()
+        trafficHistory.removeValue(forKey: liveTunnel.id)
+        trafficSnapshots.removeValue(forKey: liveTunnel.id)
+        savePersonalTunnelsOnly()
+        updateWarnings()
+        await syncSplitDNSState()
+        connectionFeedback.disconnected(liveTunnel.id)
     }
 
     // MARK: - Config Management
@@ -1424,6 +1429,20 @@ final class TunnelManager: ObservableObject, TunnelShutdownClient {
             if liveTunnel.inventoryCommand != nil { try await protectInventory(liveTunnel) }
             try await commandService.stopTunnel(configPath: configPath)
             guard !isShuttingDown else { return }
+            // Rules can't run while this restart is busy, so apply them here
+            // instead of bringing back a tunnel the current network should stop.
+            let current = tunnels.first(where: { $0.id == liveTunnel.id }) ?? liveTunnel
+            let usersCanDisconnect = current.scope != .managed || current.managedPolicy?.usersCanDisconnect != false
+            // Chain legs stop only through the chain controls, as in disconnectTunnel.
+            let isChainLeg = activeOrBusyChain(containing: current.id) != nil
+            if usersCanDisconnect && !isChainLeg && (networkMonitor.matchesDisconnect(current)
+                || (networkMonitor.wasAutoConnected(current.id) && current.autoConnectRule.connect.enabled
+                    && !networkMonitor.matchesConnect(current))) {
+                log.info("Network no longer permits automatic reconnection for \(current.name)")
+                try await finalizeStoppedTunnel(current)
+                networkMonitor.markAutoDisconnected(current.id)
+                return
+            }
             try await commandService.startTunnel(configPath: configPath)
             // The restart pass confirms all interfaces together once setup ends.
             // Keep feedback until that snapshot verifies this tunnel is present.
