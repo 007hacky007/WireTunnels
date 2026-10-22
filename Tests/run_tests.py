@@ -29,6 +29,8 @@ def main():
         subprocess.run(['python3', '-m', 'unittest', 'discover', '-s', 'Tests', '-p', 'test_server_ips.py'],
                        cwd=ROOT, env={**os.environ, 'PYTHONPATH': str(ROOT)}, check=True)
         run_suite(directory, 'shutdown', ['WireTunnels/Services/TunnelShutdownCoordinator.swift', 'Tests/TunnelShutdownTests.swift'])
+        run_suite(directory, 'network-changes', ['WireTunnels/Services/NetworkChangeScheduler.swift',
+                  'Tests/NetworkChangeSchedulerTests.swift'])
         run_suite(directory, 'readiness', ['WireTunnels/Models/WireGuardRuntimeStatus.swift',
                   'WireTunnels/Models/WireGuardEnvironment.swift', 'WireTunnels/Models/TunnelConnectionReadiness.swift',
                   'Tests/TunnelConnectionReadinessTests.swift'])

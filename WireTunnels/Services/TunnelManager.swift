@@ -50,8 +50,10 @@ final class TunnelManager: ObservableObject, TunnelShutdownClient {
     private lazy var statusMonitor = StatusMonitorService(commandService: commandService)
     private var pollingTask: Task<Void, Never>?
     private var networkCancellable: AnyCancellable?
-    private var networkChangeDebounceTask: Task<Void, Never>?
-    private var localAddressChangeDebounceTask: Task<Void, Never>?
+    private lazy var networkChangeScheduler = NetworkChangeScheduler(
+        evaluateRules: { [weak self] in await self?.evaluateNetworkRulesWhenIdle() },
+        reconnect: { [weak self] in await self?.handleLocalAddressChange() }
+    )
     /// Guards against overlapping restart passes — a DHCP renewal detected right
     /// around a system wake would otherwise trigger two concurrent stop/start
     /// cycles on the same tunnel interfaces.
@@ -101,28 +103,13 @@ final class TunnelManager: ObservableObject, TunnelShutdownClient {
         networkCancellable = self.networkMonitor.objectWillChange
             .sink { [weak self] in self?.objectWillChange.send() }
         self.networkMonitor.onNetworkChange = { [weak self] in
-            // Debounce: NWPathMonitor fires multiple times per real network change
-            // (e.g. wireguard-go creating a utun triggers another path update).
-            // Wait 500 ms before acting so only the final stable state matters.
-            self?.networkChangeDebounceTask?.cancel()
-            self?.networkChangeDebounceTask = Task { [weak self] in
-                try? await Task.sleep(nanoseconds: 500_000_000)
-                guard !Task.isCancelled else { return }
-                await self?.handleNetworkChange()
-            }
+            self?.networkChangeScheduler.schedule()
         }
         self.networkMonitor.onSystemWake = { [weak self] in
             await self?.handleSystemWake()
         }
         self.networkMonitor.onLocalAddressChange = { [weak self] in
-            // Same debounce reasoning as onNetworkChange above — coalesce the
-            // handful of path updates a single DHCP renewal tends to produce.
-            self?.localAddressChangeDebounceTask?.cancel()
-            self?.localAddressChangeDebounceTask = Task { [weak self] in
-                try? await Task.sleep(nanoseconds: 500_000_000)
-                guard !Task.isCancelled else { return }
-                await self?.handleLocalAddressChange()
-            }
+            self?.networkChangeScheduler.schedule(addressChanged: true)
         }
         Task { await initialize() }
     }
@@ -1227,6 +1214,18 @@ final class TunnelManager: ObservableObject, TunnelShutdownClient {
 
     // MARK: - Auto-Connect
 
+    private func evaluateNetworkRulesWhenIdle() async {
+        // A manual connect, wake restart or disconnect may already be running.
+        // Keep the event queued until rules can act on its confirmed result.
+        while !connectingTunnels.isEmpty || !disconnectingTunnels.isEmpty
+                || !connectingChains.isEmpty || isRestartingActiveTunnelInterfaces {
+            guard !Task.isCancelled, !isShuttingDown else { return }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        guard !Task.isCancelled, !isShuttingDown else { return }
+        await handleNetworkChange()
+    }
+
     func handleNetworkChange() async {
         guard !isShuttingDown, !isLoading, !needsSetup else { return }
 
@@ -1243,8 +1242,9 @@ final class TunnelManager: ObservableObject, TunnelShutdownClient {
             if networkMonitor.matchesDisconnect(tunnel) {
                 if tunnel.isActive {
                     log.info("Auto-disconnect rule triggered for \(tunnel.name)")
-                    networkMonitor.markAutoDisconnected(tunnel.id)
-                    await disconnectTunnel(tunnel, isAutoDisconnect: true)
+                    if await disconnectTunnel(tunnel, isAutoDisconnect: true) {
+                        networkMonitor.markAutoDisconnected(tunnel.id)
+                    }
                 }
             } else if networkMonitor.matchesConnect(tunnel) {
                 if !tunnel.isActive && !networkMonitor.isSuppressed(tunnel.id) && !connectingTunnels.contains(tunnel.id) {
@@ -1257,8 +1257,9 @@ final class TunnelManager: ObservableObject, TunnelShutdownClient {
                 networkMonitor.clearSuppression(tunnel.id)
                 if tunnel.isActive && networkMonitor.wasAutoConnected(tunnel.id) {
                     log.info("Auto-disconnect triggered for \(tunnel.name)")
-                    networkMonitor.markAutoDisconnected(tunnel.id)
-                    await disconnectTunnel(tunnel, isAutoDisconnect: true)
+                    if await disconnectTunnel(tunnel, isAutoDisconnect: true) {
+                        networkMonitor.markAutoDisconnected(tunnel.id)
+                    }
                 }
             }
         }
@@ -1360,6 +1361,8 @@ final class TunnelManager: ObservableObject, TunnelShutdownClient {
         for chain in hopChains where chain.isEnabled {
             await reconnectHopChainAfterWake(chain)
         }
+        // Retry any rule action deferred while this restart was busy.
+        await handleNetworkChange()
     }
 
     /// Re-resolves each active tunnel's configured `Endpoint` hostname and
@@ -2189,8 +2192,7 @@ final class TunnelManager: ObservableObject, TunnelShutdownClient {
     func beginShutdown() {
         isShuttingDown = true
         stopPolling()
-        networkChangeDebounceTask?.cancel()
-        localAddressChangeDebounceTask?.cancel()
+        networkChangeScheduler.cancel()
         for tunnel in tunnels { networkMonitor.userDidDisconnect(tunnel.id) }
         log.info("Quit: waiting for pending operations before disconnecting tunnels")
     }
@@ -2213,7 +2215,7 @@ final class TunnelManager: ObservableObject, TunnelShutdownClient {
     func waitForPendingOperations() async -> Bool {
         let deadline = ProcessInfo.processInfo.systemUptime + 90
         while !isInitialized || isLoading || !connectingTunnels.isEmpty || !connectingChains.isEmpty
-                || !disconnectingTunnels.isEmpty || isRestartingActiveTunnelInterfaces || pollingInProgress || networkSettingsOperations > 0 {
+                || !disconnectingTunnels.isEmpty || isRestartingActiveTunnelInterfaces || pollingInProgress || networkSettingsOperations > 0 || networkChangeScheduler.isProcessing {
             guard ProcessInfo.processInfo.systemUptime < deadline else { return false }
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
