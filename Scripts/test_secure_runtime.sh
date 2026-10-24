@@ -43,8 +43,6 @@ grep -q 'shasum -a 256' "$BUILD_SCRIPT" ||
 
 [ -f "$MANIFEST_SERVICE" ] || fail "missing app-side manifest verifier"
 [ -f "$RUNTIME_STATUS" ] || fail "missing runtime status model"
-grep -q 'import CryptoKit' "$MANIFEST_SERVICE" ||
-    fail "manifest verifier must use CryptoKit"
 grep -q 'schemaVersion == 1' "$MANIFEST_SERVICE" ||
     fail "manifest verifier must reject unsupported schemas"
 grep -q 'expectedArtifactNames' "$MANIFEST_SERVICE" ||

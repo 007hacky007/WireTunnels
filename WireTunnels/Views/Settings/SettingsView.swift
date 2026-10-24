@@ -604,29 +604,11 @@ private struct SettingsSection<Content: View>: View {
 private struct RuntimeMetadataView: View {
     let status: WireGuardRuntimeStatus
 
-    private static let dateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .medium
-        return formatter
-    }()
-
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             PathDisplayRow(label: "Runtime", path: status.versionSummary)
             PathDisplayRow(label: "Source", path: status.source)
             PathDisplayRow(label: "Architecture", path: status.architectureSummary)
-            PathDisplayRow(
-                label: "Last verified",
-                path: Self.dateFormatter.string(from: status.verifiedAt)
-            )
-
-            HStack(spacing: 6) {
-                Image(systemName: status.isValid ? "checkmark.shield.fill" : "xmark.shield.fill")
-                    .foregroundStyle(status.isValid ? .green : .red)
-                Text("SHA256: \(status.isValid ? "valid" : "invalid")")
-                    .font(.subheadline.weight(.medium))
-            }
 
             ForEach(status.artifacts) { artifact in
                 HStack {
@@ -638,8 +620,6 @@ private struct RuntimeMetadataView: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Spacer()
-                    Image(systemName: artifact.isValid ? "checkmark.circle.fill" : "xmark.circle.fill")
-                        .foregroundStyle(artifact.isValid ? .green : .red)
                 }
             }
 

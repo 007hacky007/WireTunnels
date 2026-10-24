@@ -27,6 +27,6 @@ final class WireGuardToolLocator {
               let manifest = AppPaths.bundledManifest else {
             return nil
         }
-        return verifier.inspect(directory: directory, manifestURL: manifest, location: .bundled)
+        return verifier.inspect(directory: directory, manifestURL: manifest)
     }
 }
