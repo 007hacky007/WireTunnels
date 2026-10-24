@@ -114,8 +114,8 @@ struct WireGuardManifestVerifier {
                 }
 
                 let actualHash = try sha256(of: url)
-                // For bundled artifacts, use the actual post-signing hash as the reference
-                // so bundledBinariesMatchInstalled() can compare against the installed manifest.
+                // For bundled artifacts, use the actual post-signing hash as the reference:
+                // Xcode re-signs them after the manifest is written, and Settings only displays it.
                 let referenceHash = location == .bundled ? actualHash : artifact.sha256
                 return WireGuardArtifactStatus(
                     name: artifact.name,
