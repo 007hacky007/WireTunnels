@@ -2,18 +2,26 @@
 
 This file tracks work in progress toward the next release and keeps the shipped ones as technical/QA reference. It's more detailed than the public release notes in `appcast.xml` — distill the "Public release notes (draft)" section of the unreleased version into `appcast.xml` once a build is actually signed and tagged.
 
-## Unreleased
+## 1.0.8 — released 2026-10-26
+
+Integrates the community pull requests #29, #30, #32, #35, #36, #37 and #38 (thanks @tobikris and @007hacky007) and closes issue #34. #31 is superseded by #35 (the app no longer compares tool signatures: the helper installs and verifies the tools itself).
 
 ### Security
+- **The helper enforces shared-tunnel policy and tunnel ownership** (#38, @tobikris). `usersCanConnect` / `usersCanDisconnect` were only checked in the app, and the helper started, stopped or overwrote any runtime config by name for any caller. A standard user could disconnect a shared tunnel an admin had locked, replace a shared tunnel's runtime config, stop or overwrite another user's personal tunnel, or apply an inventory to another user's tunnel. The helper now checks all of this itself; administrators (admin group) are exempt. Personal runtime configs are now owned by the user who staged them; configs staged before (root-owned) keep working.
 - **The helper installs the WireGuard tools itself** (issue #34, @tobikris). Previously the app picked the files and the helper copied them after checking hashes from a manifest in the same bundle. The app's checks could be raced, the hashes weren't anchored to anything the helper trusted, symlinks were followed, and `wg-quick` was never checked again after installation. Now the helper copies the tools only from its own app bundle into a staging folder only root can write, rejects anything that isn't a regular file, and checks each copy against anchors compiled into the helper: `wg` and `wireguard-go` must be signed by the app's team with their own identifier, and `wg-quick` must match the SHA-256 generated when the helper was built. `bin/` is replaced only when all three pass.
 - **Tools are checked before every run.** The helper installs at start and whenever a check fails. Right before launching a tool it checks it again (all three for `wg-quick`, only `wg` for other `wg` commands). A tool that fails is replaced from the bundle and the event is logged as an error, both in the system log (`tool-installer` category) and in the app's log as `Helper: …`.
 - **XPC clients are verified by audit token instead of PID** (#37, @tobikris). The helper trusted a caller after resolving its PID to code and checking the signature, and read the caller's uid via `proc_pidinfo`. A process could queue messages and then exec into the signed app, so the PID check passed while the queued messages came from the attacker. Now `setCodeSigningRequirement` has the system check the app's identifier and team against every incoming message's audit token, and the uid comes from `effectiveUserIdentifier`. The PID-based check is removed. A client that doesn't match is accepted and then disconnected at its first message.
+
+### New features
+- **On-Demand Ethernet rules by subnet** (#29, @007hacky007): an Ethernet rule can list IPv4/IPv6 subnets and matches when a local Ethernet address is inside one of them, so a tunnel can connect at the office dock and stay off at home. An empty list still means any Ethernet network, so existing rules keep working. The editor has an *Any Ethernet Network* checkbox, a CIDR list (invalid and duplicate entries are rejected) and shows the current Ethernet addresses. Managed tunnels keep the subnets in the helper too.
 
 ### Changes
 - No more *Install Tools* / *Reinstall Tools* buttons. Approving the helper is enough; the setup wizard's second step is now *Prepare WireGuard Tools* with *Retry*, and connecting waits until the helper reports the tools ready.
 - Settings > WireGuard Tools shows the bundled tools' provenance (versions, source, revisions, architectures). The "SHA256: valid" shield and "Last verified" time are gone: for bundled tools they compared each file with itself. "Binaries: Verified / Not Ready" shows the helper's actual result.
 
 ### Bug fixes
+- **Network changes are handled by one scheduler** (#30, @007hacky007). Network changes and local address changes used two separate debounce tasks that could run at the same time, so a rule could disconnect a tunnel while the address-change restart was stopping and starting it, and a rule action skipped because the tunnel was busy was lost. One scheduler now waits for the burst to settle, evaluates the rules, restarts interfaces if an address changed and evaluates the rules again, waiting while a connect, disconnect or restart runs. A tunnel is marked auto-disconnected only after the disconnect really happened, and Quit cancels the scheduler and waits for it. The wake and address-change restart no longer start tunnels that the network rules forbid.
+- **Tunnel toggles are disabled while connecting** (#32, @007hacky007): the dashboard row, the detail view and the multi-hop view use the same busy check as the menu bar, and a chain is busy while either leg is connecting or reconnecting.
 - Quitting works after the helper was removed while the app ran (e.g. by an uninstall script or `launchctl remove`). Previously every quit failed with "Unable to confirm the current tunnel state" because `SMAppService` still reported the helper enabled. Quit now asks launchd whether the helper is still registered; if not, it falls back to the existing check for leftover tunnels in `/var/run/wireguard`, so a quit with tunnels still running is refused as before.
 - An install interrupted by a helper restart no longer leaves a half-filled staging folder in `/Library/Application Support/WireTunnels`; the next install removes it.
 
@@ -35,6 +43,10 @@ This file tracks work in progress toward the next release and keeps the shipped 
 <ul>
     <li>Security: the privileged helper now installs the WireGuard tools itself, only from the signed app, and checks them before every use; modified tools are replaced and logged</li>
     <li>Security: the privileged helper checks the app's signature on every request, so another program can no longer impersonate WireTunnels</li>
+    <li>Security: the helper now enforces shared-tunnel permissions and tunnel ownership itself, so a standard user can no longer stop, replace or change tunnels they are not allowed to</li>
+    <li>New: On-Demand Ethernet rules can be limited to subnets, to connect at the office but not at home</li>
+    <li>Network changes are handled one at a time and tunnels the rules forbid are no longer restarted after wake; tunnel toggles are disabled while connecting</li>
+    <li>Quit works even if the helper was removed while the app was running</li>
     <li>No more Install Tools step: approving the helper is enough</li>
 </ul>
 <p><strong>Notes</strong></p>

@@ -22,7 +22,7 @@
 <p align="center">
   <a href="#download">Download</a> ·
   <a href="#features">Features</a> ·
-  <a href="#whats-new-in-106">What's new</a> ·
+  <a href="#whats-new-in-108">What's new</a> ·
   <a href="#screenshots">Screenshots</a> ·
   <a href="#security--privacy">Security & Privacy</a> ·
   <a href="#installation">Installation</a> ·
@@ -138,17 +138,15 @@ WireTunnels is distributed as a signed and notarized macOS `.dmg` disk image, an
 
 ---
 
-## What's new in 1.0.7
+## What's new in 1.0.8
 
-* **Working kill switch** — enabling it now really blocks traffic outside the tunnel; its rules were previously never evaluated by the system firewall.
-* **Security fix** — closed wg-quick hook filter bypasses that could run commands as root from a crafted configuration.
-* **Inventory AllowedIPs** — a personal tunnel can run a local command after connecting and add the validated IPs/CIDRs it prints to its AllowedIPs and routes; they stay protected outside the VPN.
-* **Search Domains** — a dedicated field for DNS search domains, applied while connected and restored on disconnect.
-* **Duplicate tunnel**, **monochrome menu bar icon** and an **automatic update-check** setting.
-* **Quieter recovery** — failed automatic reconnects stay in the log; the menu bar and menu show connecting, reconnecting or connection lost with *Retry* and *Details*.
-* **Safer quit and DNS** — quitting waits for cleanup and restores DNS; DNS only changes on the active network and is repaired after an interrupted setup; sleep no longer triggers timeout errors.
+* **Helper installs the tools itself** — approving the helper is enough: it copies `wg`, `wireguard-go` and `wg-quick` from the signed app, checks them before every run and replaces any that were modified. No more *Install Tools* step.
+* **Stronger helper security** — the helper verifies every XPC client by audit token instead of PID, and enforces shared-tunnel permissions and tunnel ownership itself.
+* **Ethernet rules by subnet** — On-Demand Ethernet rules can be limited to IPv4/IPv6 subnets (connect at the office dock, stay off at home).
+* **Steadier network changes** — network and address changes are handled by one scheduler; tunnels the rules forbid are not restarted after wake, and tunnel toggles are disabled while connecting.
+* **Quit after helper removal** — Quit works even if the helper was removed while the app was running.
 
-Earlier highlights (1.0.x): split DNS, long tunnel names, shared tunnel access control, start in background, multi-hop chains, Shortcuts/Siri support, split-tunnel exclusions, throughput speed test, DHCP/sleep/DDNS auto-recovery, editable shared tunnels, notarized DMG distribution and in-app updates.
+Earlier highlights (1.0.x): working kill switch, inventory AllowedIPs, Search Domains, duplicate tunnel, split DNS, long tunnel names, shared tunnel access control, start in background, multi-hop chains, Shortcuts/Siri support, split-tunnel exclusions, throughput speed test, DHCP/sleep/DDNS auto-recovery, editable shared tunnels, notarized DMG distribution and in-app updates.
 
 See [CHANGELOG.md](./CHANGELOG.md) for the full technical detail.
 

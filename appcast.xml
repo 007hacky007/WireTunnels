@@ -8,6 +8,34 @@
         <description>WireTunnels update feed</description>
         <language>en</language>
         <item>
+            <title>Version 1.0.8</title>
+            <pubDate>Mon, 26 Oct 2026 00:00:00 +0000</pubDate>
+            <sparkle:version>9</sparkle:version>
+            <sparkle:shortVersionString>1.0.8</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[
+                <ul>
+                    <li>Security: the privileged helper now installs the WireGuard tools itself, only from the signed app, and checks them before every use; modified tools are replaced and logged</li>
+                    <li>Security: the privileged helper checks the app's signature on every request, so another program can no longer impersonate WireTunnels</li>
+                    <li>Security: the helper now enforces shared-tunnel permissions and tunnel ownership itself, so a standard user can no longer stop, replace or change tunnels they are not allowed to</li>
+                    <li>No more Install Tools step: approving the helper is enough</li>
+                    <li>New: On-Demand Ethernet rules can be limited to subnets, to connect at the office but not at home</li>
+                    <li>Network changes are handled one at a time and tunnels the rules forbid are no longer restarted after wake; tunnel toggles are disabled while connecting</li>
+                    <li>Quit works even if the helper was removed while the app was running</li>
+                </ul>
+                <p><strong>Notes</strong></p>
+                <ul>
+                    <li>Existing installs will be prompted to update the privileged helper on first launch after upgrading</li>
+                </ul>
+            ]]></description>
+            <enclosure
+                url="https://github.com/FMDigitech/WireTunnels/releases/download/v1.0.8/WireTunnels-1.0.8.dmg"
+                sparkle:edSignature="S5hsC275YewdSRDNzA8oAcLxkYVnErTIAKGhGKO/fstQyY41gfpSjL2k0j2n8daKIFT93213S5zJfaCJTt45Cw=="
+                length="15153331"
+                type="application/octet-stream"
+            />
+        </item>
+        <item>
             <title>Version 1.0.7</title>
             <pubDate>Wed, 21 Oct 2026 00:00:00 +0000</pubDate>
             <sparkle:version>8</sparkle:version>
