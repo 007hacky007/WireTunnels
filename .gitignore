@@ -18,7 +18,3 @@ playground.xcworkspace
 
 # macOS
 .DS_Store
-AGENTS.md
-.gitignore
-graphify-out/
-CLAUDE.md
