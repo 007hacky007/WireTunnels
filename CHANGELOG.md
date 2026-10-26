@@ -22,7 +22,7 @@ This file tracks work in progress toward the next release and keeps the shipped 
 - `wg` and `wireguard-go` are signed with an explicit identifier (`codesign` otherwise derived ones like `wg-55554944…`), and the signing identity is part of the tool cache key. The first build after updating rebuilds the tools once.
 
 ### Helper
-- Protocol revision `inventory-routing-v2-helper-tools` (`installBundledTools` removed, `toolStatus` added): installed helpers are detected as stale and replaced on first launch.
+- Protocol revision `ethernet-subnets-v1-helper-tools` (helper tools + Ethernet subnet rules; `installBundledTools` removed, `toolStatus` added): installed helpers are detected as stale and replaced on first launch.
 
 ### Known limitations / follow-ups
 - Builds signed by another team, or ad-hoc, can't install the tools: the helper requires the team in `applicationTeamIdentifier`. Local test builds need their own team ID and bundle ID.
