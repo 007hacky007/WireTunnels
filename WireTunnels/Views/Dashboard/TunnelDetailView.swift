@@ -81,12 +81,18 @@ struct TunnelDetailView: View {
     @State private var connectAnyWiFi: Bool                   = true
     @State private var connectSSIDs: [String]                 = []
     @State private var connectNewSSID: String                 = ""
+    @State private var connectAnyEthernet: Bool               = true
+    @State private var connectEthernetSubnets: [String]       = []
+    @State private var connectNewEthernetSubnet: String       = ""
 
     @State private var disconnectEnabled: Bool                   = false
     @State private var disconnectInterface: AutoConnectInterface = .wifi
     @State private var disconnectAnyWiFi: Bool                   = true
     @State private var disconnectSSIDs: [String]                 = []
     @State private var disconnectNewSSID: String                 = ""
+    @State private var disconnectAnyEthernet: Bool               = true
+    @State private var disconnectEthernetSubnets: [String]       = []
+    @State private var disconnectNewEthernetSubnet: String       = ""
 
     @State private var knownNetworks: [String] = []
 
@@ -536,8 +542,12 @@ struct TunnelDetailView: View {
                 anyWiFi: $connectAnyWiFi,
                 ssids: $connectSSIDs,
                 newSSID: $connectNewSSID,
+                anyEthernet: $connectAnyEthernet,
+                ethernetSubnets: $connectEthernetSubnets,
+                newEthernetSubnet: $connectNewEthernetSubnet,
                 knownNetworks: knownNetworks,
                 currentSSID: tunnelManager.networkMonitor.currentSSID,
+                currentEthernetAddresses: tunnelManager.networkMonitor.ethernetAddresses,
                 canEdit: canEditOnDemand,
                 hasWiFiNamePermission: tunnelManager.networkMonitor.hasWiFiNamePermission,
                 onRequestWiFiPermission: { tunnelManager.networkMonitor.requestWiFiNamePermissionIfNeeded() },
@@ -555,8 +565,12 @@ struct TunnelDetailView: View {
                 anyWiFi: $disconnectAnyWiFi,
                 ssids: $disconnectSSIDs,
                 newSSID: $disconnectNewSSID,
+                anyEthernet: $disconnectAnyEthernet,
+                ethernetSubnets: $disconnectEthernetSubnets,
+                newEthernetSubnet: $disconnectNewEthernetSubnet,
                 knownNetworks: knownNetworks,
                 currentSSID: tunnelManager.networkMonitor.currentSSID,
+                currentEthernetAddresses: tunnelManager.networkMonitor.ethernetAddresses,
                 canEdit: canEditOnDemand,
                 hasWiFiNamePermission: tunnelManager.networkMonitor.hasWiFiNamePermission,
                 onRequestWiFiPermission: { tunnelManager.networkMonitor.requestWiFiNamePermissionIfNeeded() },
@@ -601,12 +615,18 @@ struct TunnelDetailView: View {
         connectAnyWiFi   = rule.connect.matchesAnyWiFi
         connectSSIDs     = rule.connect.wifiSSIDs
         connectNewSSID   = ""
+        connectAnyEthernet = rule.connect.matchesAnyEthernet
+        connectEthernetSubnets = rule.connect.ethernetSubnets
+        connectNewEthernetSubnet = ""
 
         disconnectEnabled   = rule.disconnect.enabled
         disconnectInterface = rule.disconnect.interface
         disconnectAnyWiFi   = rule.disconnect.matchesAnyWiFi
         disconnectSSIDs     = rule.disconnect.wifiSSIDs
         disconnectNewSSID   = ""
+        disconnectAnyEthernet = rule.disconnect.matchesAnyEthernet
+        disconnectEthernetSubnets = rule.disconnect.ethernetSubnets
+        disconnectNewEthernetSubnet = ""
     }
 
     private func saveRule() {
@@ -615,12 +635,14 @@ struct TunnelDetailView: View {
             connect: AutoConnectNetworkMatch(
                 enabled: connectEnabled,
                 interface: connectInterface,
-                wifiSSIDs: connectAnyWiFi ? [] : connectSSIDs
+                wifiSSIDs: connectAnyWiFi ? [] : connectSSIDs,
+                ethernetSubnets: connectAnyEthernet ? [] : connectEthernetSubnets
             ),
             disconnect: AutoConnectNetworkMatch(
                 enabled: disconnectEnabled,
                 interface: disconnectInterface,
-                wifiSSIDs: disconnectAnyWiFi ? [] : disconnectSSIDs
+                wifiSSIDs: disconnectAnyWiFi ? [] : disconnectSSIDs,
+                ethernetSubnets: disconnectAnyEthernet ? [] : disconnectEthernetSubnets
             )
         )
         if isManaged {
